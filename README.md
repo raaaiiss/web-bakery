@@ -11,6 +11,10 @@ Isi versi 1:
 
 Belum ada (fase 2 dan 3): gaji, hak akses per orang, laporan 7 hari/bulanan, unduh Excel, backup otomatis.
 
+Tampilan: krem kertas, tinta cokelat kakao, tombol cokelat roti; navigasi bawah di HP, rel kiri di tablet.
+Font Karla dan Playfair Display (lisensi SIL Open Font License) disimpan di `static/fonts/`,
+jadi tampilan tidak bergantung pada internet.
+
 ## Kebutuhan
 
 Hanya Python 3.9 atau lebih baru. Tidak perlu install paket lain. Linux, Windows, dan Mac bisa.
