@@ -1,0 +1,7 @@
+# Data jualan dan gaji tidak boleh masuk git
+data/
+*.db
+*.db-*
+backup/
+.env
+__pycache__/

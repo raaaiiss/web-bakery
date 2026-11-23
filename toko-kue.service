@@ -1,0 +1,15 @@
+# Contoh service systemd: aplikasi nyala otomatis saat home server hidup.
+# Sesuaikan User dan path, lalu lihat README bagian "Nyala otomatis".
+[Unit]
+Description=Pencatatan Toko Kue
+After=network.target
+
+[Service]
+User=tokokue
+WorkingDirectory=/opt/toko-kue
+ExecStart=/usr/bin/python3 /opt/toko-kue/app.py
+Environment=KUE_PORT=8000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
