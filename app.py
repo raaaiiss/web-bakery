@@ -6,7 +6,9 @@ Jalankan:  python3 app.py      lalu buka http://<ip-server>:8000 dari HP di wifi
 """
 import hashlib
 import html
+import base64
 import os
+import re
 import secrets
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -122,6 +124,7 @@ def init_db():
     db = connect()
     db.executescript(SCHEMA)
     migrasi(db)
+    migrasi_tampilan(db)
     db.close()
 
 
@@ -200,6 +203,51 @@ def migrasi(db):
         db.execute("PRAGMA user_version = 2")
 
 
+# Warna kartu kue (teks putih di atasnya, kontras >= 5:1).
+PALET = {"cokelat": "#7A4A2A", "karamel": "#A8521C", "madu": "#8C6210", "pandan": "#4F6B2D",
+         "stroberi": "#A3344A", "ubi": "#6B4A80", "kopi": "#4A3426", "matcha": "#3F6B4A"}
+FOTO_MAKS = 1_500_000      # byte, setelah diperkecil di browser
+BODY_MAKS = 3_000_000      # batas ukuran kiriman form
+
+
+def migrasi_tampilan(db):
+    """Tambah kolom warna dan foto kue. Hanya menambah kolom (cek dulu), data lama tidak berubah."""
+    kolom = {r[1] for r in db.execute("PRAGMA table_info(cakes)")}
+    with db:
+        if "color" not in kolom:
+            db.execute("ALTER TABLE cakes ADD COLUMN color TEXT")
+        if "photo" not in kolom:
+            db.execute("ALTER TABLE cakes ADD COLUMN photo TEXT")
+
+
+def warna_kue(k):
+    return PALET.get(k["color"] or "", list(PALET.values())[k["id"] % len(PALET)])
+
+
+def inisial(nama):
+    kata = [w for w in nama.split() if w[:1].isalnum()]
+    return "".join(w[0] for w in kata[:2]).upper() or "?"
+
+
+def gambar_kue(k, kelas="gbr"):
+    """Foto kue kalau ada; kalau belum, kotak berwarna dengan inisial supaya kartu tidak kosong."""
+    if k["photo"]:
+        return f'<span class="{kelas}"><img src="/foto/{e(k["photo"])}" alt="" loading="lazy"></span>'
+    return f'<span class="{kelas} inisial" style="background:{warna_kue(k)}" aria-hidden="true">{e(inisial(k["name"]))}</span>'
+
+
+def foto_dir():
+    return os.path.join(os.path.dirname(DB_PATH), "foto")
+
+
+def hapus_file_foto(nama):
+    if nama and re.fullmatch(r"kue-\d+-[0-9a-f]{12}\.jpg", nama):
+        try:
+            os.remove(os.path.join(foto_dir(), nama))
+        except FileNotFoundError:
+            pass
+
+
 def hari_hari(dari, sampai):
     d, akhir = date.fromisoformat(dari), date.fromisoformat(sampai)
     while d <= akhir:
@@ -227,6 +275,34 @@ def laporan_rentang(db, dari, sampai):
     sering_sisa = max((k for k in items if k["hari_sisa"] > 0), key=lambda k: (k["hari_sisa"], k["sisa"]), default=None)
     return {"dari": dari, "sampai": sampai, "hari": hari, "items": items, "total": total,
             "laku": laku, "sering_sisa": sering_sisa, "sisa_belum": sisa_belum}
+
+
+def sisa_per_hari(db, dari, sampai):
+    """Sisa per kue per hari + daftar batch per tanggal buat. Rumus tidak berubah: angka uang dari laporan_harian."""
+    hari = list(hari_hari(dari, sampai))
+    dibuat = {(r["date"], r["cake_id"]): r["q"] for r in db.execute(
+        "SELECT date, cake_id, SUM(qty) q FROM production WHERE date BETWEEN ? AND ? GROUP BY date, cake_id", (dari, sampai))}
+    sisa = {(r["date"], r["cake_id"]): r["qty"] for r in db.execute(
+        "SELECT date, cake_id, qty FROM leftover WHERE date BETWEEN ? AND ?", (dari, sampai))}
+    ids = sorted({c for _, c in dibuat})
+    kue = {r["id"]: r for r in db.execute(
+        f"SELECT * FROM cakes WHERE id IN ({','.join('?' * len(ids))})", ids)} if ids else {}
+    baris = []
+    for cid in sorted(ids, key=lambda c: kue[c]["name"]):
+        sel = {}
+        for d in hari:
+            if (d, cid) not in dibuat:
+                sel[d] = None                         # tidak ada produksi
+            else:
+                sel[d] = sisa.get((d, cid), "?")      # "?" = sisa belum diisi
+        angka_ = [v for v in sel.values() if isinstance(v, int)]
+        baris.append({"kue": kue[cid], "sel": sel, "hari_sisa": sum(1 for v in angka_ if v > 0),
+                      "hari_habis": sum(1 for v in angka_ if v == 0), "total_sisa": sum(angka_)})
+    batch = {}
+    for r in db.execute("""SELECT p.date, p.cake_id, p.qty, p.created FROM production p
+                           WHERE p.date BETWEEN ? AND ? ORDER BY p.date DESC, p.id""", (dari, sampai)):
+        batch.setdefault(r["date"], {}).setdefault(r["cake_id"], []).append(r)
+    return {"hari": hari, "baris": baris, "batch": batch, "kue": kue, "sisa": sisa, "dibuat": dibuat}
 
 
 def gaji_info(db, user, sampai=None):
@@ -406,6 +482,86 @@ details[open]>summary .biasa{color:var(--ink-2)}
 .centang.mati{color:var(--ink-2)}
 .centang small{font-size:14px}
 
+/* gambar kue: foto atau warna + inisial */
+.gbr{display:flex;align-items:center;justify-content:center;overflow:hidden;color:#fff;font:800 22px/1 var(--sans);letter-spacing:.5px;background:var(--tint)}
+.gbr img{width:100%;height:100%;object-fit:cover;display:block}
+.gbr.mini{width:52px;height:52px;flex:none;border-radius:12px;font-size:17px}
+.gbr.pratinjau{width:96px;height:72px;flex:none;border-radius:12px;font-size:24px}
+.sembunyi{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.tampilan{border:0;padding:0;margin:8px 0 0}
+.pilih-foto{margin:0}
+.palet{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}
+.swatch{margin:0;display:flex;flex-direction:column;align-items:center;gap:4px;font-weight:500;cursor:pointer}
+.swatch input{position:absolute;opacity:0;pointer-events:none}
+.swatch span{width:100%;height:40px;border-radius:10px;border:3px solid transparent}
+.swatch small{font-size:13px;color:var(--ink-2)}
+.swatch input:checked+span{border-color:var(--ink);box-shadow:inset 0 0 0 2px #fff}
+.swatch input:focus-visible+span{outline:3px solid var(--crust);outline-offset:2px}
+
+/* kartu pilih kue (Produksi) */
+.kartu-kue{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.kartu-kue>input{position:absolute;opacity:0;pointer-events:none}
+.kartu-kue label{position:relative;margin:0;display:flex;flex-direction:column;background:var(--surface);border:2px solid var(--line);
+  border-radius:18px;overflow:hidden;cursor:pointer;font-weight:700;transition:border-color .12s}
+.kartu-kue .gbr.foto{aspect-ratio:3/2;width:100%;font-size:34px;border-radius:0}
+.kartu-kue .nama-kue{padding:10px 12px 0;font-size:16px;line-height:1.25}
+.kartu-kue .sub{padding:2px 12px 12px;font-weight:500;font-size:14px;color:var(--ink-2)}
+.kartu-kue .cek{position:absolute;top:8px;right:8px;width:32px;height:32px;border-radius:50%;background:var(--crust);color:#fff;
+  display:none;align-items:center;justify-content:center;box-shadow:0 0 0 3px #fff}
+.kartu-kue .cek .ikon{width:20px;height:20px;stroke-width:2.5}
+.kartu-kue>input:checked+label{border-color:var(--crust);background:var(--tint)}
+.kartu-kue>input:checked+label .cek{display:flex}
+.kartu-kue>input:focus-visible+label{outline:3px solid var(--crust);outline-offset:2px}
+.stepper.di-bar{flex:none;gap:6px}
+.stepper.di-bar button{width:48px;height:56px}
+.stepper.di-bar input{width:64px;min-height:56px}
+
+/* sisa per batch */
+.daftar li>.baris:first-child:has(.gbr.mini)+details{margin-left:64px}
+.sisa-baris{display:block}
+.sisa-baris .stepper{gap:6px}.sisa-baris .stepper button{width:46px;height:50px}.sisa-baris .stepper input{width:58px;min-height:50px}
+.batch-info{font-size:14px;color:var(--ink-2);margin:8px 0 0 64px}
+
+/* sisa per kue per hari */
+.geser{overflow-x:auto;margin:0 -20px;padding:0 20px}
+.grid-sisa{border-collapse:separate;border-spacing:2px;font-size:15px}
+.grid-sisa th{font-size:12px;font-weight:700;color:var(--ink-2);text-align:center;padding:2px;line-height:1.2}
+.grid-sisa td{min-width:31px;height:36px;text-align:center;border-radius:8px;font-weight:800;padding:0}
+.grid-sisa .kolom-kue{position:sticky;left:0;background:var(--bg);text-align:left;font-size:14px;color:var(--ink);
+  min-width:96px;max-width:116px;padding-right:4px}
+.grid-sisa .kolom-kue .baris{gap:8px}
+.gbr.titik{width:22px;height:22px;flex:none;border-radius:6px;font-size:10px}
+.grid-sisa td.habis,.cth.habis{background:#E1EBD4;color:#33461C}
+.grid-sisa td.ada,.cth.ada{background:#F6DDCF;color:#7A2F12}
+.grid-sisa td.belum{background:#F8E7C6;color:#5E3B0A}
+.grid-sisa td.kosong{color:var(--line-strong);font-weight:500}
+.grid-sisa th.hariini{color:var(--crust)}
+.cth{display:inline-block;min-width:22px;text-align:center;border-radius:6px;font-weight:800;padding:0 4px;background:var(--tint)}
+.tgl-batch{font:700 15px/1.3 var(--sans);margin:18px 0 6px}
+.rugi-teks{color:var(--terra-text)}
+
+/* beranda */
+.kepala{background:var(--crust);color:#fff;border-radius:22px;padding:18px 20px 16px;margin-bottom:8px}
+.kepala .sapa{font:700 18px/1.2 var(--serif);opacity:.95}
+.kepala .label{font-size:15px;font-weight:600;opacity:.9;margin-top:12px}
+.kepala .angka{font:800 42px/1.05 var(--sans);letter-spacing:-1px;margin:4px 0 0}
+.kepala .angka small{font-size:21px;font-weight:700;margin-right:6px;letter-spacing:0}
+.statistik{display:grid;grid-template-columns:repeat(3,1fr);margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,.3)}
+.statistik div{display:flex;flex-direction:column}
+.statistik div+div{padding-left:14px;border-left:1px solid rgba(255,255,255,.3)}
+.statistik b{font:800 22px/1.1 var(--sans)}
+.statistik span{font-size:14px;opacity:.9}
+.grup{background:var(--surface);border:1px solid var(--line);border-radius:22px;padding:4px 14px 14px;margin-top:12px}
+.grup h2{margin:12px 2px 8px}
+.menu-ikon{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.menu-ikon a{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px 2px;min-height:88px;border-radius:14px;
+  color:var(--ink);text-decoration:none;font-weight:700;font-size:14px;text-align:center;line-height:1.2}
+.menu-ikon a:active{background:var(--tint)}
+.lingkar{width:52px;height:52px;border-radius:16px;background:var(--tint);color:var(--crust);display:flex;align-items:center;justify-content:center}
+.lingkar .ikon{width:26px;height:26px}
+.batang{height:8px;border-radius:4px;background:var(--tint);margin-top:6px;overflow:hidden}
+.batang span{display:block;height:100%;background:var(--crust);border-radius:4px}
+
 @media (min-width:768px){
   :root{--rail:104px}
   .nav{top:0;right:auto;width:var(--rail);flex-direction:column;justify-content:flex-start;padding-top:20px;border-top:0;border-right:1px solid var(--line)}
@@ -418,6 +574,9 @@ details[open]>summary .biasa{color:var(--ink-2)}
   .atas,main{padding-left:32px;padding-right:32px}
   h1{font-size:36px}
   .ubin{grid-template-columns:repeat(3,1fr)}
+  .kartu-kue{grid-template-columns:repeat(4,1fr)}
+  .kepala .angka{font-size:54px}
+  .menu-ikon{grid-template-columns:repeat(4,1fr)}
   .utama-blok .angka,.besar .angka{font-size:56px}
   .duo .nilai{font-size:32px}
   .bar .isi{max-width:520px;margin:0}
@@ -429,7 +588,18 @@ JS = """document.addEventListener('click',function(ev){var b=ev.target.closest('
 var i=b.parentNode.querySelector('input');var v=parseInt(i.value||'0',10)||0;v=Math.max(0,v+parseInt(b.dataset.langkah,10));
 if(i.dataset.maks)v=Math.min(v,parseInt(i.dataset.maks,10));i.value=v;});
 document.addEventListener('click',function(ev){var b=ev.target.closest('[data-preset]');if(!b)return;
-var pilih=b.dataset.preset.split(',');b.form.querySelectorAll('input[name=akses]').forEach(function(c){c.checked=pilih.indexOf(c.value)>=0;});});"""
+var pilih=b.dataset.preset.split(',');b.form.querySelectorAll('input[name=akses]').forEach(function(c){c.checked=pilih.indexOf(c.value)>=0;});});
+document.addEventListener('change',function(ev){var t=ev.target,box=t.closest('fieldset.tampilan');if(!box)return;
+var p=box.querySelector('.pratinjau');
+if(t.name==='color'&&p.classList.contains('inisial')){p.style.background=t.dataset.hex;return;}
+if(!t.matches('[data-foto]')||!t.files[0])return;
+var r=new FileReader();r.onload=function(){var img=new Image();img.onload=function(){
+var W=640,H=480,c=document.createElement('canvas');c.width=W;c.height=H;var k=Math.max(W/img.width,H/img.height);
+var w=img.width*k,h=img.height*k;c.getContext('2d').drawImage(img,(W-w)/2,(H-h)/2,w,h);
+var d=c.toDataURL('image/jpeg',0.82);box.querySelector('input[name=foto_data]').value=d;
+p.className='gbr pratinjau';p.style.background='';p.innerHTML='<img alt="" src="'+d+'">';};img.src=r.result;};
+r.readAsDataURL(t.files[0]);});
+document.querySelectorAll('.geser').forEach(function(g){g.scrollLeft=g.scrollWidth;});"""
 
 IKON = {
     "beranda": '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/>',
@@ -447,6 +617,7 @@ IKON = {
     "orang": '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
     "jam": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     "dompet": '<path d="M4 7h15a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a2 2 0 0 1 2-2h11v3"/><path d="M16 13.5h.01"/>',
+    "kalender": '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/><path d="M8 14h.01M12 14h.01M16 14h.01M8 17.5h.01M12 17.5h.01"/>',
     "keluar": '<path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h10"/>',
 }
 
@@ -467,9 +638,10 @@ def kabar(jenis, isi):
     return f'<div class="kabar {jenis}" role="{role}">{ikon(ik)}<div>{isi}</div></div>'
 
 
-def stepper(nama, nilai, label, maks=None, lebar=False):
+def stepper(nama, nilai, label, maks=None, lebar=False, form=None, kelas=""):
     m = f' data-maks="{maks}"' if maks is not None else ""
-    return f"""<div class="stepper{' lebar' if lebar else ''}">
+    m += f' form="{form}" required' if form else ""
+    return f"""<div class="stepper{' lebar' if lebar else ''} {kelas}">
       <button type="button" data-langkah="-1" aria-label="Kurangi {e(label)}">{ikon("minus")}</button>
       <input name="{nama}" value="{e(nilai)}" inputmode="numeric" pattern="[0-9]*" placeholder="0" aria-label="{e(label)}"{m}>
       <button type="button" data-langkah="1" aria-label="Tambah {e(label)}">{ikon("plus")}</button></div>"""
@@ -507,6 +679,7 @@ ROUTES = {
     ("GET", "/sisa"): ("sisa", ("sisa",)),
     ("POST", "/sisa"): ("sisa_simpan", ("sisa",)),
     ("GET", "/laporan"): ("laporan", ("omzet", "untung")),
+    ("GET", "/sisa-harian"): ("sisa_harian", ("sisa", "omzet", "untung")),
     ("GET", "/gaji"): ("gaji", ("gaji",)),
     ("POST", "/gaji/:id/bayar"): ("gaji_bayar", "admin"),
     ("GET", "/kue"): ("kue", ("kue",)),
@@ -534,10 +707,17 @@ class App(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path.startswith("/static/fonts/"):
             return self.font(url.path.rsplit("/", 1)[-1])
+        if url.path.startswith("/foto/"):
+            return self.foto(url.path.rsplit("/", 1)[-1])
         self.q = {k: v[0] for k, v in parse_qs(url.query).items()}
         self.f, self.fl, self.akses = {}, {}, set()
         if method == "POST":
             n = int(self.headers.get("Content-Length") or 0)
+            if n > BODY_MAKS:
+                self.send_response(413)
+                self.send_header("Content-Length", "0")
+                self.send_header("Connection", "close")
+                return self.end_headers()
             body = self.rfile.read(n).decode("utf-8", "replace")
             self.fl = parse_qs(body, keep_blank_values=True)
             self.f = {k: v[0] for k, v in self.fl.items()}
@@ -588,6 +768,21 @@ class App(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def foto(self, nama):
+        path = os.path.join(foto_dir(), nama)
+        if not re.fullmatch(r"kue-\d+-[0-9a-f]{12}\.jpg", nama) or not os.path.isfile(path):
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            return self.end_headers()
+        with open(path, "rb") as fh:
+            data = fh.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")  # nama file berganti tiap foto baru
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def user_sekarang(self):
         c = SimpleCookie(self.headers.get("Cookie", ""))
         if "sesi" not in c:
@@ -627,6 +822,7 @@ class App(BaseHTTPRequestHandler):
         nav = ""
         if pakai_nav:
             path = urlparse(self.path).path
+            path = {"/sisa-harian": "/sisa"}.get(path, path)
             hrefs = [h for h, _, _ in menu]
             bagian = path if path in hrefs else ("/lainnya" if "/lainnya" in hrefs else "")
             nav = '<nav class="nav" aria-label="Menu utama">' + "".join(
@@ -751,44 +947,71 @@ class App(BaseHTTPRequestHandler):
         boleh_omzet, boleh_untung = self.boleh("omzet"), self.boleh("untung")
         if not self.admin() and self.akses == {"produksi"}:
             return self.redirect("/produksi")
+        if not self.admin() and not self.akses:
+            return self.page("Beranda", kabar("awas", "Akunmu belum punya akses apa pun. Minta admin mencentang akses untukmu."),
+                             alis=tgl_indo(tgl), h1="Hari ini")
         lp = laporan_harian(self.db, tgl)
         t = lp["total"]
-        isi = ""
+        n_batch = self.db.execute("SELECT COUNT(*) FROM production WHERE date = ?", (tgl,)).fetchone()[0]
+        lihat_angka = self.admin() or boleh_omzet or boleh_untung or self.boleh("sisa")
+
+        # 1. Header berwarna: penjualan hari ini + jumlah batch
+        sisa_teks = "belum" if lp["sisa_belum"] else t["sisa"]
+        isi = f'<section class="kepala" aria-label="Ringkasan hari ini"><div class="sapa">Halo, {e(self.user["name"])}</div>'
         if boleh_omzet:
-            isi += f"""<section class="utama-blok" aria-label="Omzet hari ini">
-              <div class="label">Omzet hari ini</div>
-              <div class="angka">{rp_besar(t['omzet'])}</div>
-              <div class="sub">{t['terjual']} kue terjual dari {t['dibuat']} dibuat</div></section>"""
-        if boleh_untung:
-            isi += f"""<div class="duo">
-              <div><div class="label">Untung</div><div class="nilai untung">{rupiah(t['untung'])}</div></div>
-              <div><div class="label">Rugi dari sisa</div><div class="nilai rugi">{rupiah(t['kerugian'])}</div></div></div>"""
+            isi += f'<div class="label">Penjualan hari ini</div><div class="angka">{rp_besar(t["omzet"])}</div>'
+        if lihat_angka:
+            isi += f"""<div class="statistik"><div><b>{n_batch}</b><span>batch</span></div>
+              <div><b>{t['terjual']}</b><span>terjual</span></div><div><b>{sisa_teks}</b><span>sisa</span></div></div>"""
+        isi += "</section>"
+
+        # 2. Menu berkelompok dalam kartu bersudut membulat
+        grup = [("Produksi & sisa", [("/produksi", "produksi", "Catat produksi", self.boleh("produksi")),
+                                     ("/sisa", "sisa", "Catat sisa", self.boleh("sisa")),
+                                     ("/sisa-harian", "kalender", "Sisa per hari", lihat_angka)]),
+                ("Kue & laporan", [("/kue", "kue", "Daftar kue", self.boleh("kue")),
+                                   ("/laporan", "laporan", "Laporan", boleh_omzet or boleh_untung)]),
+                ("Orang", [("/gaji", "dompet", "Gaji", self.boleh("gaji")),
+                           ("/pengguna", "orang", "Pengguna", self.admin()),
+                           ("/riwayat", "jam", "Riwayat", self.admin())])]
+        for judul, menu in grup:
+            tombol = [(h, i, t_) for h, i, t_, ok in menu if ok]
+            if tombol:
+                isi += f'<section class="grup"><h2>{judul}</h2><div class="menu-ikon">' + "".join(
+                    f'<a href="{h}"><span class="lingkar">{ikon(i)}</span>{t_}</a>' for h, i, t_ in tombol) + "</div></section>"
+
         if self.boleh("gaji") and not self.admin():
             g = gaji_info(self.db, self.user)
             isi += f"""<div class="duo"><div><div class="label">Gaji berjalan</div>
               <div class="nilai">{rupiah(g['jumlah'])}</div></div>
-              <div><div class="label">Sejak</div><div class="nilai" style="font-size:20px">{tgl_indo(g['mulai']) if not g['sudah_lunas'] else 'baru dibayar'}</div></div></div>
-              <p style="margin-top:12px"><a href="/gaji">Lihat rincian gaji</a></p>"""
-        if self.admin() or boleh_omzet or boleh_untung or self.boleh("sisa"):
+              <div><div class="label">Sejak</div><div class="nilai" style="font-size:20px">{tgl_indo(g['mulai']) if not g['sudah_lunas'] else 'baru dibayar'}</div></div></div>"""
+
+        # 3. Laporan harian singkat + kue terlaris
+        if lihat_angka:
+            isi += "<h2>Laporan hari ini</h2>"
+            if boleh_untung:
+                isi += f"""<div class="duo" style="border-top:1px solid var(--line)">
+                  <div><div class="label">Untung</div><div class="nilai untung">{rupiah(t['untung'])}</div></div>
+                  <div><div class="label">Rugi dari sisa</div><div class="nilai rugi">{rupiah(t['kerugian'])}</div></div></div>"""
             if not lp["items"]:
-                isi += '<h2>Status</h2>' + kabar("awas", "Belum ada produksi hari ini.")
+                isi += kabar("awas", "Belum ada produksi hari ini.")
             elif lp["sisa_belum"]:
-                isi += '<h2>Status</h2>' + kabar(
-                    "awas", f'Sisa belum diisi untuk {len(lp["sisa_belum"])} kue. Sampai diisi, semua dianggap terjual.')
+                isi += kabar("awas", f'Sisa belum diisi untuk {len(lp["sisa_belum"])} kue. Sampai diisi, semua dianggap terjual.')
             else:
-                isi += '<h2>Status</h2>' + kabar("ok", "Sisa hari ini sudah diisi.")
+                isi += kabar("ok", "Sisa hari ini sudah diisi.")
             if lp["items"]:
-                isi += '<h2>Per kue</h2><ul class="daftar">'
-                for i in lp["items"]:
-                    s = i["sisa"] if i["sisa_diisi"] else "belum"
-                    isi += f"""<li class="baris"><div><div class="nama">{e(i['nama'])}</div>
-                      <div class="info"><span>dibuat {i['dibuat']}</span><span>sisa {s}</span></div></div>
+                kue = {r["name"]: r for r in self.db.execute("SELECT id, name, color, photo FROM cakes")}
+                laris = sorted(lp["items"], key=lambda i: (-i["terjual"], i["nama"]))[:5]
+                puncak = max(laris[0]["terjual"], 1)
+                isi += '<h2>Kue terlaris hari ini</h2><ul class="daftar laris">'
+                for i in laris:
+                    isi += f"""<li class="baris">{gambar_kue(kue[i['nama']], "gbr mini")}
+                      <div style="flex:1;min-width:0"><div class="nama">{e(i['nama'])}</div>
+                      <div class="batang" aria-hidden="true"><span style="width:{round(100 * i['terjual'] / puncak)}%"></span></div></div>
                       <div class="kanan"><div class="qty">{i['terjual']}</div><div class="kecil">terjual</div></div></li>"""
                 isi += "</ul>"
         if boleh_omzet or boleh_untung:
             isi += f'<p style="margin-top:20px"><a href="/laporan?tanggal={tgl}">Laporan harian lengkap</a></p>'
-        if not isi:
-            isi = kabar("awas", "Akunmu belum punya akses apa pun. Minta admin mencentang akses untukmu.")
         tombol = []
         if self.boleh("produksi"):
             tombol.append('<a class="tombol" href="/produksi">Catat produksi</a>')
@@ -819,21 +1042,21 @@ class App(BaseHTTPRequestHandler):
         isi = form_tanggal("/produksi", tgl) if self.admin() else ""
         bar = ""
         if kue:
-            ubin = "".join(
-                f"""<input type="radio" name="cake_id" id="k{k['id']}" value="{k['id']}" required{' checked' if n == 0 else ''}>
-                <label for="k{k['id']}">{e(k['name'])}<span>hari ini {k['hari_ini'] or 0}</span></label>"""
-                for n, k in enumerate(kue))
+            kartu = "".join(
+                f"""<input type="radio" name="cake_id" id="k{k['id']}" value="{k['id']}" required>
+                <label for="k{k['id']}">{gambar_kue(k, "gbr foto")}<span class="cek">{ikon("cek")}</span>
+                <span class="nama-kue">{e(k['name'])}</span><span class="sub">hari ini {k['hari_ini'] or 0}</span></label>"""
+                for k in kue)
             isi += f"""<form id="f-produksi" method="post" action="/produksi">
               <input type="hidden" name="tanggal" value="{tgl}">
-              <fieldset style="border:0;padding:0;margin:0"><legend class="lbl" style="margin-top:4px">1. Pilih kue</legend>
-              <div class="ubin">{ubin}</div></fieldset>
-              <span class="lbl">2. Jumlah dibuat di batch ini</span>
-              {stepper("qty", "", "Jumlah dibuat", lebar=True)}
+              <fieldset style="border:0;padding:0;margin:0"><legend class="lbl" style="margin-top:4px">Pilih kue, isi jumlah di bawah, lalu simpan</legend>
+              <div class="kartu-kue">{kartu}</div></fieldset>
               <p class="bantu">Bikin lagi nanti? Simpan sebagai batch baru, otomatis dijumlahkan.</p></form>"""
-            bar = bar_aksi('<button class="tombol" form="f-produksi">Simpan batch</button>')
+            bar = bar_aksi(stepper("qty", "", "Jumlah dibuat di batch ini", form="f-produksi", kelas="di-bar"),
+                           '<button class="tombol" form="f-produksi">Simpan batch</button>')
         else:
             isi += kabar("awas", "Belum ada kue. Admin perlu menambah kue dulu di menu Lainnya, Daftar kue.")
-        rows = self.db.execute("""SELECT p.*, c.name kue, u.name oleh FROM production p
+        rows = self.db.execute("""SELECT p.*, c.name kue, c.name, c.color, c.photo, c.id cid, u.name oleh FROM production p
             JOIN cakes c ON c.id = p.cake_id JOIN users u ON u.id = p.user_id
             WHERE p.date = ? ORDER BY p.id DESC""", (tgl,)).fetchall()
         if rows:
@@ -848,8 +1071,10 @@ class App(BaseHTTPRequestHandler):
                       <button class="tombol sedang">Simpan</button></div></form>
                       <form method="post" action="/produksi/{r['id']}/hapus" onsubmit="return confirm('Hapus batch ini?')">
                       <button class="teks-merah">Hapus batch ini</button></form></div></details>"""
-                isi += f"""<li><div class="baris"><span class="nama">{e(r['kue'])}</span><span class="kanan qty">{r['qty']}</span></div>
-                  <div class="info"><span>{r['created'][11:16]}</span><span>{e(r['oleh'])}</span></div>{ubah}</li>"""
+                k = {"id": r["cid"], "name": r["kue"], "color": r["color"], "photo": r["photo"]}
+                isi += f"""<li><div class="baris">{gambar_kue(k, "gbr mini")}<span style="min-width:0"><span class="nama">{e(r['kue'])}</span>
+                  <span class="info" style="margin:2px 0 0"><span>{r['created'][11:16]}</span><span>{e(r['oleh'])}</span></span></span>
+                  <span class="kanan qty">{r['qty']}</span></div>{ubah}</li>"""
             isi += "</ul>"
         alis = tgl_indo(tgl) if self.admin() else f"Halo, {e(self.user['name'])} · {tgl_indo(tgl)}"
         self.page("Input produksi", isi, alis=alis, bar=bar)
@@ -901,10 +1126,13 @@ class App(BaseHTTPRequestHandler):
     def sisa(self):
         # Non-admin dengan akses "input sisa" hanya untuk hari ini; tanggal lain khusus admin.
         tgl = tanggal(self.q["tanggal"]) if self.admin() and self.q.get("tanggal") else today()
-        rows = self.db.execute("""SELECT c.id, c.name, SUM(p.qty) dibuat,
+        rows = self.db.execute("""SELECT c.id, c.name, c.color, c.photo, SUM(p.qty) dibuat,
               (SELECT qty FROM leftover l WHERE l.cake_id = c.id AND l.date = :d) sisa
             FROM production p JOIN cakes c ON c.id = p.cake_id WHERE p.date = :d
             GROUP BY c.id ORDER BY c.name""", {"d": tgl}).fetchall()
+        batch = {}
+        for b in self.db.execute("SELECT cake_id, qty, created FROM production WHERE date = ? ORDER BY id", (tgl,)):
+            batch.setdefault(b["cake_id"], []).append(f'{b["qty"]} pcs ({b["created"][11:16]})')
         isi = form_tanggal("/sisa", tgl) if self.admin() else ""
         bar = ""
         if not rows:
@@ -914,10 +1142,14 @@ class App(BaseHTTPRequestHandler):
             isi += f'<form id="f-sisa" method="post" action="/sisa"><input type="hidden" name="tanggal" value="{tgl}"><ul class="daftar">'
             for r in rows:
                 val = "" if r["sisa"] is None else r["sisa"]
-                isi += f"""<li class="baris"><div><div class="nama">{e(r['name'])}</div>
+                isi += f"""<li class="sisa-baris"><div class="baris">{gambar_kue(r, "gbr mini")}
+                  <div style="min-width:0"><div class="nama">{e(r['name'])}</div>
                   <div class="info" style="margin-top:2px">dibuat {r['dibuat']}</div></div>
-                  <div class="kanan">{stepper(f"sisa_{r['id']}", val, f"Sisa {r['name']}", maks=r['dibuat'])}</div></li>"""
+                  <div class="kanan">{stepper(f"sisa_{r['id']}", val, f"Sisa {r['name']}", maks=r['dibuat'])}</div></div>
+                  <div class="batch-info">Batch: {", ".join(e(x) for x in batch.get(r["id"], []))}</div></li>"""
             isi += "</ul></form>"
+            if self.boleh("sisa") or self.boleh("omzet") or self.boleh("untung"):
+                isi += '<p style="margin-top:16px"><a href="/sisa-harian">Lihat sisa per kue per hari</a></p>'
             bar = bar_aksi('<button class="tombol" form="f-sisa">Simpan sisa</button>')
         self.page("Sisa saat tutup", isi, bar=bar, alis=tgl_indo(tgl))
 
@@ -1035,6 +1267,85 @@ class App(BaseHTTPRequestHandler):
           <div class="info"><span>dibuat {t['dibuat']}</span><span>sisa {t['sisa']}</span><span>terjual {t['terjual']}</span></div></li></ul>"""
         self.page(judul, isi, alis=alis)
 
+    # --- sisa per kue per hari + per batch ---
+
+    def sisa_harian(self):
+        if not self.q.get("periode"):
+            self.q["periode"] = "7"
+        periode, dari, sampai = self.rentang_laporan()
+        if (date.fromisoformat(sampai) - date.fromisoformat(dari)).days > 61:
+            raise Gagal("Untuk halaman ini, rentang maksimal 2 bulan.")
+        data = sisa_per_hari(self.db, dari, sampai)
+        pilihan = [("hari", "Hari ini", f"/sisa-harian?periode=hari&tanggal={today()}"), ("7", "7 hari", "/sisa-harian?periode=7"),
+                   ("bulan", "Bulan ini", "/sisa-harian?periode=bulan"),
+                   ("rentang", "Rentang", f"/sisa-harian?periode=rentang&dari={dari}&sampai={sampai}")]
+        isi = '<nav class="pilih" aria-label="Pilih periode">' + "".join(
+            f'<a href="{h}"{" aria-current=true" if periode == p else ""}>{t_}</a>' for p, t_, h in pilihan) + "</nav>"
+        if periode == "rentang":
+            isi += f"""<form class="rentang" method="get" action="/sisa-harian"><input type="hidden" name="periode" value="rentang">
+              <div><label for="dari">Dari</label><input id="dari" type="date" name="dari" value="{dari}"></div>
+              <div><label for="sampai">Sampai</label><input id="sampai" type="date" name="sampai" value="{sampai}"></div>
+              <button class="tombol sedang">Tampilkan</button></form>"""
+        alis = tgl_indo(dari) if dari == sampai else f"{tgl_indo(dari)} – {tgl_indo(sampai)}"
+        if not data["baris"]:
+            return self.page("Sisa per hari", isi + kabar("awas", "Belum ada produksi di periode ini."), alis=alis)
+        nama_hari = ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"]
+        kepala = "".join(f'<th scope="col"{" class=hariini" if d == today() else ""}>{nama_hari[date.fromisoformat(d).weekday()]}<br>{int(d[8:])}</th>'
+                         for d in data["hari"])
+        isi += f"""<h2>Sisa per kue per hari</h2>
+          <p class="bantu" style="margin-top:0">Angka = sisa saat tutup. <span class="cth habis">0</span> habis terjual,
+          <span class="cth ada">3</span> ada sisa, <span class="cth">?</span> belum diisi, – tidak dibuat.</p>
+          <div class="geser"><table class="grid-sisa"><thead><tr><th scope="col" class="kolom-kue">Kue</th>{kepala}
+          </tr></thead><tbody>"""
+        for b in data["baris"]:
+            sel = ""
+            for d in data["hari"]:
+                v = b["sel"][d]
+                if v is None:
+                    sel += '<td class="kosong">–</td>'
+                elif v == "?":
+                    sel += '<td class="belum">?</td>'
+                else:
+                    sel += f'<td class="{"habis" if v == 0 else "ada"}">{v}</td>'
+            isi += f"""<tr><th scope="row" class="kolom-kue"><span class="baris">{gambar_kue(b['kue'], "gbr titik")}{e(b['kue']['name'])}</span></th>
+              {sel}</tr>"""
+        isi += "</tbody></table></div>"
+        sering = sorted((b for b in data["baris"] if b["hari_sisa"]), key=lambda b: (-b["hari_sisa"], -b["total_sisa"]))[:3]
+        habis = sorted((b for b in data["baris"] if b["hari_habis"]), key=lambda b: -b["hari_habis"])[:3]
+        if sering or habis:
+            isi += '<ul class="daftar" style="margin-top:16px">'
+            if sering:
+                isi += ('<li><div class="kecil">Rutin sisa</div><div style="font-weight:700">'
+                        + ", ".join(f'{e(b["kue"]["name"])} ({b["hari_sisa"]} hari)' for b in sering) + "</div></li>")
+            if habis:
+                isi += ('<li><div class="kecil">Sering habis</div><div style="font-weight:700">'
+                        + ", ".join(f'{e(b["kue"]["name"])} ({b["hari_habis"]} hari)' for b in habis) + "</div></li>")
+            isi += "</ul>"
+
+        # per batch, dikelompokkan per tanggal buat (paling baru dulu, maksimal 7 tanggal)
+        boleh_untung = self.boleh("untung")
+        tanggal_batch = sorted(data["batch"], reverse=True)
+        isi += "<h2>Per batch</h2>"
+        for d in tanggal_batch[:7]:
+            rugi = {}
+            if boleh_untung:
+                rugi = {i["nama"]: i["kerugian"] for i in laporan_harian(self.db, d)["items"]}
+            isi += f'<h3 class="tgl-batch">Dibuat {tgl_indo(d)}</h3><ul class="daftar">'
+            for cid, bs in sorted(data["batch"][d].items(), key=lambda kv: data["kue"][kv[0]]["name"]):
+                k = data["kue"][cid]
+                sisa = data["sisa"].get((d, cid))
+                teks_sisa = "sisa belum diisi" if sisa is None else ("habis" if sisa == 0 else f"sisa {sisa}")
+                uang = f' · rugi {rupiah(rugi[k["name"]])}' if boleh_untung and sisa else ""
+                daftar_batch = ", ".join(f'{b["qty"]} pcs (jam {b["created"][11:16]})' for b in bs)
+                isi += f"""<li class="baris">{gambar_kue(k, "gbr mini")}<div style="flex:1;min-width:0">
+                  <div class="nama">{e(k['name'])}</div><div class="info" style="margin-top:2px">{daftar_batch}</div>
+                  <div class="info{' rugi-teks' if sisa else ''}" style="margin-top:2px;font-weight:700">{teks_sisa}{uang}</div></div>
+                  <div class="kanan"><div class="qty">{data['dibuat'][(d, cid)]}</div><div class="kecil">dibuat</div></div></li>"""
+            isi += "</ul>"
+        if len(tanggal_batch) > 7:
+            isi += f'<p class="bantu">Menampilkan 7 tanggal terbaru dari {len(tanggal_batch)} tanggal di periode ini.</p>'
+        self.page("Sisa per hari", isi, alis=alis)
+
     # --- gaji ---
 
     def gaji(self):
@@ -1099,6 +1410,24 @@ class App(BaseHTTPRequestHandler):
 
     # --- kue ---
 
+    def isian_tampilan(self, k, pre):
+        """Pilihan foto dan warna kartu kue. Foto diperkecil di browser (JS) lalu dikirim sebagai teks base64."""
+        sekarang = (k["color"] or "") if k else ""
+        warna = "".join(
+            f"""<label class="swatch" title="{n}"><input type="radio" name="color" value="{n}" data-hex="{h}"{' checked' if n == sekarang else ''}>
+              <span style="background:{h}"></span><small>{n}</small></label>""" for n, h in PALET.items())
+        contoh = gambar_kue(k, "gbr pratinjau") if k else '<span class="gbr pratinjau inisial" style="background:#7A4A2A">?</span>'
+        hapus = (f"""<label class="centang" style="border:0"><input type="checkbox" name="hapus_foto" value="1">
+                   <span>Hapus foto, pakai warna saja</span></label>""" if k and k["photo"] else "")
+        return f"""<fieldset class="tampilan"><legend class="lbl">Tampilan kartu</legend>
+          <div class="baris" style="align-items:flex-start">{contoh}
+          <div style="flex:1;min-width:0"><label class="tombol garis sedang pilih-foto" for="foto{pre}">Pilih foto</label>
+          <input id="foto{pre}" type="file" accept="image/*" data-foto class="sembunyi">
+          <input type="hidden" name="foto_data">
+          <p class="bantu">Tanpa foto, kartu memakai warna dan huruf depan nama kue.</p></div></div>
+          {hapus}
+          <div class="palet" role="radiogroup" aria-label="Warna kartu">{warna}</div></fieldset>"""
+
     def kue(self):
         rows = self.db.execute("SELECT * FROM cakes ORDER BY active DESC, name").fetchall()
         modal = self.boleh("modal")
@@ -1110,6 +1439,7 @@ class App(BaseHTTPRequestHandler):
           <label for="kn">Nama kue</label><input id="kn" name="name" required>
           <label for="kj">Harga jual</label><input id="kj" name="price_sell" inputmode="numeric" required placeholder="5000">
           {isian_modal}
+          {self.isian_tampilan(None, "baru")}
           <button class="tombol penuh" style="margin-top:20px">Simpan kue</button></form></div></details>"""
         if rows:
             isi += '<ul class="daftar" style="margin-top:16px">'
@@ -1119,13 +1449,15 @@ class App(BaseHTTPRequestHandler):
             info_modal = (f" · modal {rupiah(k['price_cost'])}" if k["price_cost"] else " · modal belum diisi") if modal else ""
             ubah_modal = (f"""<label for="m{k['id']}">Harga modal</label><input id="m{k['id']}" name="price_cost" value="{k['price_cost']}" inputmode="numeric" required>"""
                           if modal else "")
-            isi += f"""<li><details><summary><div class="baris"><span><span class="nama">{e(k['name'])}</span>{status}
+            isi += f"""<li><details><summary><div class="baris">{gambar_kue(k, "gbr mini")}
+                <span style="min-width:0"><span class="nama">{e(k['name'])}</span>{status}
                 <span class="info" style="margin:2px 0 0">jual {rupiah(k['price_sell'])}{info_modal}</span></span>
                 <span class="kanan biasa">Ubah</span></div></summary>
               <div class="panel"><form method="post" action="/kue/{k['id']}/ubah">
               <label for="n{k['id']}">Nama kue</label><input id="n{k['id']}" name="name" value="{e(k['name'])}" required>
               <label for="j{k['id']}">Harga jual</label><input id="j{k['id']}" name="price_sell" value="{k['price_sell']}" inputmode="numeric" required>
               {ubah_modal}
+              {self.isian_tampilan(k, k['id'])}
               <label style="display:flex;gap:10px;align-items:center;font-weight:500"><input type="checkbox" name="active" value="1" {cek} style="width:24px;height:24px;accent-color:var(--crust)"> Masih dijual</label>
               <p class="bantu">Harga baru hanya berlaku untuk batch berikutnya. Catatan lama tetap.</p>
               <button class="tombol penuh" style="margin-top:12px">Simpan perubahan</button></form></div></details></li>"""
@@ -1140,14 +1472,55 @@ class App(BaseHTTPRequestHandler):
         hm = angka(self.f.get("price_cost"), "Harga modal") if self.boleh("modal") else modal_lama
         return name, angka(self.f.get("price_sell"), "Harga jual"), hm
 
+    def isian_warna(self, lama=None):
+        w = self.f.get("color") or lama
+        if w and w not in PALET:
+            raise Gagal("Warna tidak dikenal.")
+        return w
+
+    def simpan_foto(self, cake_id, lama):
+        """Simpan foto baru (JPEG dari browser) atau hapus foto. Kembalikan nama file foto yang berlaku."""
+        data_url = self.f.get("foto_data", "")
+        if self.f.get("hapus_foto") and not data_url:
+            hapus_file_foto(lama)
+            return None
+        if not data_url:
+            return lama
+        awalan = "data:image/jpeg;base64,"
+        if not data_url.startswith(awalan):
+            raise Gagal("Foto harus berupa gambar JPEG. Coba pilih ulang fotonya.")
+        try:
+            data = base64.b64decode(data_url[len(awalan):], validate=True)
+        except ValueError:
+            raise Gagal("Foto rusak. Coba pilih ulang fotonya.")
+        if not data.startswith(b"\xff\xd8\xff") or len(data) > FOTO_MAKS:
+            raise Gagal("Foto tidak bisa dipakai (bukan JPEG atau terlalu besar).")
+        os.makedirs(foto_dir(), exist_ok=True)
+        nama = f"kue-{cake_id}-{secrets.token_hex(6)}.jpg"
+        sementara = os.path.join(foto_dir(), nama + ".tmp")
+        with open(sementara, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(sementara, os.path.join(foto_dir(), nama))
+        hapus_file_foto(lama)
+        return nama
+
     def kue_tambah(self):
         name, hj, hm = self.isian_kue()
+        warna = self.isian_warna()
         try:
             with self.db:
-                self.db.execute("INSERT INTO cakes(name, price_sell, price_cost) VALUES(?,?,?)", (name, hj, hm))
+                cur = self.db.execute("INSERT INTO cakes(name, price_sell, price_cost, color) VALUES(?,?,?,?)",
+                                      (name, hj, hm, warna))
                 catat(self.db, self.user["id"], "tambah kue", f"{name} jual {hj} modal {hm}")
         except sqlite3.IntegrityError:
             raise Gagal("Nama kue sudah ada.")
+        foto = self.simpan_foto(cur.lastrowid, None)
+        if foto:
+            with self.db:
+                self.db.execute("UPDATE cakes SET photo = ? WHERE id = ?", (foto, cur.lastrowid))
+                catat(self.db, self.user["id"], "ubah foto kue", f"{name}: foto baru")
         self.redirect("/kue", f"{name} ditambahkan.")
 
     def kue_ubah(self):
@@ -1155,16 +1528,22 @@ class App(BaseHTTPRequestHandler):
         if not lama:
             raise Gagal("Kue tidak ditemukan.", 404)
         name, hj, hm = self.isian_kue(modal_lama=lama["price_cost"])
+        warna = self.isian_warna(lama["color"])
         aktif = 1 if self.f.get("active") else 0
         try:
             with self.db:
-                self.db.execute("UPDATE cakes SET name = ?, price_sell = ?, price_cost = ?, active = ? WHERE id = ?",
-                                (name, hj, hm, aktif, self.id))
+                self.db.execute("UPDATE cakes SET name = ?, price_sell = ?, price_cost = ?, active = ?, color = ? WHERE id = ?",
+                                (name, hj, hm, aktif, warna, self.id))
                 catat(self.db, self.user["id"], "ubah kue",
                       f"{lama['name']} (jual {lama['price_sell']}, modal {lama['price_cost']}, aktif {lama['active']}) -> "
                       f"{name} (jual {hj}, modal {hm}, aktif {aktif})")
         except sqlite3.IntegrityError:
             raise Gagal("Nama kue sudah ada.")
+        foto = self.simpan_foto(self.id, lama["photo"])
+        if foto != lama["photo"]:
+            with self.db:
+                self.db.execute("UPDATE cakes SET photo = ? WHERE id = ?", (foto, self.id))
+                catat(self.db, self.user["id"], "ubah foto kue", f"{name}: {'foto baru' if foto else 'foto dihapus'}")
         self.redirect("/kue", f"{name} disimpan.")
 
     # --- pengguna dan akses (khusus admin) ---

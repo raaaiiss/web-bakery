@@ -16,12 +16,22 @@ Fase 2:
   "Tandai sudah dibayar" menyimpan riwayat dan hitungan mulai lagi dari nol besoknya. Gaji tidak dikurangkan dari untung.
 - Laporan: hari ini, 7 hari, bulan ini, rentang tanggal.
 
+Tampilan baru:
+- Beranda: header berwarna (penjualan hari ini, jumlah batch, terjual, sisa), menu berkelompok dalam kartu
+  bersudut membulat, laporan hari ini, dan kue terlaris.
+- Pilih kue lewat kartu bergambar di Produksi; jumlah dan tombol Simpan ada di bar bawah (zona jempol).
+- Halaman Kue: foto atau warna per kue. Foto diperkecil di browser (640x480 JPEG) lalu disimpan di
+  `data/foto/` (ikut folder data, tidak masuk git). Tanpa foto, kartu memakai warna + inisial nama.
+- Sisa per batch: halaman Sisa menampilkan batch hari itu; halaman "Sisa per hari" menampilkan sisa
+  per kue per hari (habis / ada sisa / belum diisi) dan daftar batch per tanggal buat.
+
 Belum ada (fase 3): unduh Excel, backup otomatis, push ke GitHub.
 
 ### Pembaruan database
 Saat `app.py` versi fase 2 pertama kali jalan, database lama otomatis dinaikkan ke versi 2: hanya menambah
 tabel `user_perms`, `wage_payments` dan kolom `users.pct`, `users.gaji_mulai`. Tidak ada data yang dihapus.
 Karyawan lama tetap punya akses input produksi. Tetap salin `data/toko.db` dulu sebelum memasang versi baru.
+Versi tampilan baru menambah kolom `cakes.color` dan `cakes.photo` (dicek dulu, hanya menambah).
 
 Tampilan: krem kertas, tinta cokelat kakao, tombol cokelat roti; navigasi bawah di HP, rel kiri di tablet.
 Font Karla dan Playfair Display (lisensi SIL Open Font License) disimpan di `static/fonts/`,
@@ -74,7 +84,8 @@ Kalau firewall aktif (`ufw`): `sudo ufw allow from <jaringan-wifi-toko> to any p
 python3 -m unittest -v
 ```
 
-`test_app.py` (fase 1) dan `test_fase2.py` (migrasi, akses + 403, gaji, filter laporan) menyalakan server
+`test_app.py` (fase 1), `test_fase2.py` (migrasi, akses + 403, gaji, filter laporan) dan `test_tampilan.py`
+(foto/warna kue, kartu, Beranda, sisa per batch dan per hari) menyalakan server
 sungguhan dengan database sementara. Alur satu hari fase 1:
 produksi beberapa batch, koreksi, sisa, laporan, ganti harga, dan batas akses karyawan.
 
