@@ -565,7 +565,8 @@ details[open]>summary .biasa{color:var(--ink-2)}
 .lencana.pasti{background:#E1EBD4;color:#33461C}
 .besar .lencana{font-size:13px;margin-left:4px}
 .hari-ini{padding:12px 0 4px;font-weight:600;font-size:16px}
-.hari-ini b{font:800 20px var(--sans)}
+.hari-ini b{font:800 20px var(--sans);white-space:nowrap}
+.hari-ini>span:first-child{min-width:0}
 .diperbarui{font-size:13px;color:var(--ink-2);margin:-12px 0 14px}
 .akibat{margin:0 0 16px;padding-left:20px;line-height:1.6}
 .tombol.bahaya{background:var(--danger);border-color:var(--danger)}
