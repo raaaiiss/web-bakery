@@ -121,6 +121,7 @@ def connect():
 def init_db():
     db = connect()
     db.executescript(SCHEMA)
+    migrasi(db)
     db.close()
 
 
@@ -158,6 +159,87 @@ def laporan_harian(db, tgl):
     banyak_sisa = max((i for i in items if i["sisa"] > 0), key=lambda i: i["sisa"], default=None)
     return {"items": items, "total": total, "laku": laku, "banyak_sisa": banyak_sisa,
             "sisa_belum": [i["nama"] for i in items if not i["sisa_diisi"]]}
+
+
+# ---------- fase 2: akses, laporan rentang, gaji ----------
+
+# Hak akses yang bisa dicentang admin per karyawan. "Kelola user" tidak ada di sini: itu khusus admin.
+PERMS = [("produksi", "Input produksi"), ("sisa", "Input sisa"), ("omzet", "Lihat omzet"),
+         ("untung", "Lihat untung"), ("gaji", "Lihat gaji sendiri"), ("modal", "Lihat harga modal"),
+         ("kue", "Kelola kue & harga")]
+PERM_KEYS = {k for k, _ in PERMS}
+AKSES_KAKAK = ("produksi", "gaji", "omzet", "untung")
+GAJI_PERSEN_DEFAULT = 25
+
+MIGRASI = """
+CREATE TABLE IF NOT EXISTS user_perms(
+  user_id INTEGER NOT NULL REFERENCES users(id), perm TEXT NOT NULL, PRIMARY KEY(user_id, perm));
+CREATE TABLE IF NOT EXISTS wage_payments(
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
+  period_start TEXT NOT NULL, period_end TEXT NOT NULL, omzet INTEGER NOT NULL, pct INTEGER NOT NULL,
+  amount INTEGER NOT NULL, paid_at TEXT NOT NULL, paid_by INTEGER NOT NULL REFERENCES users(id));
+"""
+
+
+def migrasi(db):
+    """Versi 1 -> 2. Hanya menambah tabel dan kolom; tidak ada data yang dihapus. Aman dijalankan berulang."""
+    if db.execute("PRAGMA user_version").fetchone()[0] >= 2:
+        return
+    kolom = {r[1] for r in db.execute("PRAGMA table_info(users)")}
+    with db:
+        db.executescript(MIGRASI)
+        if "pct" not in kolom:
+            db.execute(f"ALTER TABLE users ADD COLUMN pct INTEGER NOT NULL DEFAULT {GAJI_PERSEN_DEFAULT}")
+        if "gaji_mulai" not in kolom:
+            db.execute("ALTER TABLE users ADD COLUMN gaji_mulai TEXT")
+        awal = db.execute("SELECT MIN(date) FROM production").fetchone()[0] or today()
+        db.execute("UPDATE users SET gaji_mulai = ? WHERE gaji_mulai IS NULL", (awal,))
+        # Karyawan lama di versi 1 sudah bisa input produksi; akses itu dipertahankan.
+        db.execute("""INSERT OR IGNORE INTO user_perms(user_id, perm)
+                      SELECT id, 'produksi' FROM users WHERE role = 'karyawan'""")
+        db.execute("PRAGMA user_version = 2")
+
+
+def hari_hari(dari, sampai):
+    d, akhir = date.fromisoformat(dari), date.fromisoformat(sampai)
+    while d <= akhir:
+        yield d.isoformat()
+        d += timedelta(days=1)
+
+
+def laporan_rentang(db, dari, sampai):
+    """Gabungan laporan_harian per hari, jadi rumus dan harga tersimpan sama persis dengan laporan harian."""
+    hari = [r[0] for r in db.execute(
+        "SELECT DISTINCT date FROM production WHERE date BETWEEN ? AND ? ORDER BY date", (dari, sampai))]
+    per_kue, sisa_belum = {}, []
+    angka_ = ("dibuat", "terjual", "sisa", "omzet", "kerugian", "untung", "untung_bersih")
+    for d in hari:
+        lp = laporan_harian(db, d)
+        for i in lp["items"]:
+            k = per_kue.setdefault(i["nama"], {"nama": i["nama"], "hari_sisa": 0, **{a: 0 for a in angka_}})
+            for a in angka_:
+                k[a] += i[a]
+            k["hari_sisa"] += 1 if i["sisa"] > 0 else 0
+        sisa_belum += [(d, n) for n in lp["sisa_belum"]]
+    items = sorted(per_kue.values(), key=lambda k: k["nama"])
+    total = {a: sum(k[a] for k in items) for a in angka_}
+    laku = max(items, key=lambda k: k["terjual"], default=None)
+    sering_sisa = max((k for k in items if k["hari_sisa"] > 0), key=lambda k: (k["hari_sisa"], k["sisa"]), default=None)
+    return {"dari": dari, "sampai": sampai, "hari": hari, "items": items, "total": total,
+            "laku": laku, "sering_sisa": sering_sisa, "sisa_belum": sisa_belum}
+
+
+def gaji_info(db, user, sampai=None):
+    """Gaji berjalan: persen user x omzet (harga jual tersimpan x terjual) sejak pembayaran terakhir.
+    Tidak dikurangkan dari untung (menunggu keputusan pemilik)."""
+    sampai = sampai or today()
+    akhir = db.execute("SELECT MAX(period_end) FROM wage_payments WHERE user_id = ?", (user["id"],)).fetchone()[0]
+    mulai = (date.fromisoformat(akhir) + timedelta(days=1)).isoformat() if akhir else (user["gaji_mulai"] or today())
+    lp = laporan_rentang(db, mulai, sampai) if mulai <= sampai else None
+    omzet = lp["total"]["omzet"] if lp else 0
+    return {"mulai": mulai, "sampai": sampai, "omzet": omzet, "pct": user["pct"],
+            "jumlah": omzet * user["pct"] // 100, "sisa_belum": lp["sisa_belum"] if lp else [],
+            "sudah_lunas": mulai > sampai}
 
 
 # ---------- tampilan ----------
@@ -303,6 +385,26 @@ details[open]>summary .biasa{color:var(--ink-2)}
 .masuk{max-width:440px;margin:0 auto;padding:48px 24px}
 .masuk .merek{font-size:34px;display:block;margin-bottom:6px}
 
+/* filter periode laporan */
+.pilih{display:flex;gap:6px;margin:4px 0 12px;overflow-x:auto}
+.pilih a{flex:none;min-height:44px;display:flex;align-items:center;padding:0 14px;border-radius:999px;border:1.5px solid var(--line-strong);
+  color:var(--ink);text-decoration:none;font-weight:700;font-size:15px;background:var(--surface)}
+.pilih a[aria-current]{background:var(--ink);border-color:var(--ink);color:#fff}
+.rentang{display:grid;grid-template-columns:1fr 1fr;gap:0 10px;align-items:end;margin-bottom:8px}
+.rentang label{margin:4px 0 6px;font-size:14px}
+.rentang .tombol{grid-column:1/-1;margin-top:10px}
+
+/* gaji */
+.gaji-blok{padding:16px 0 20px;border-bottom:1px solid var(--line)}
+.gaji-blok+.gaji-blok{margin-top:8px}
+
+/* centang akses */
+.akses{border:0;padding:0;margin:0}
+.centang{display:flex;align-items:center;gap:12px;min-height:48px;margin:0;font-weight:500;font-size:17px;border-bottom:1px solid var(--line)}
+.centang input{width:24px;height:24px;flex:none;accent-color:var(--crust)}
+.centang.mati{color:var(--ink-2)}
+.centang small{font-size:14px}
+
 @media (min-width:768px){
   :root{--rail:104px}
   .nav{top:0;right:auto;width:var(--rail);flex-direction:column;justify-content:flex-start;padding-top:20px;border-top:0;border-right:1px solid var(--line)}
@@ -324,7 +426,9 @@ details[open]>summary .biasa{color:var(--ink-2)}
 
 JS = """document.addEventListener('click',function(ev){var b=ev.target.closest('[data-langkah]');if(!b)return;
 var i=b.parentNode.querySelector('input');var v=parseInt(i.value||'0',10)||0;v=Math.max(0,v+parseInt(b.dataset.langkah,10));
-if(i.dataset.maks)v=Math.min(v,parseInt(i.dataset.maks,10));i.value=v;});"""
+if(i.dataset.maks)v=Math.min(v,parseInt(i.dataset.maks,10));i.value=v;});
+document.addEventListener('click',function(ev){var b=ev.target.closest('[data-preset]');if(!b)return;
+var pilih=b.dataset.preset.split(',');b.form.querySelectorAll('input[name=akses]').forEach(function(c){c.checked=pilih.indexOf(c.value)>=0;});});"""
 
 IKON = {
     "beranda": '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/>',
@@ -341,6 +445,7 @@ IKON = {
     "kue": '<path d="M4 20h16"/><path d="M5 20v-7a7 7 0 0 1 14 0v7"/><path d="M9 13v3M15 13v3M12 12v4"/>',
     "orang": '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
     "jam": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    "dompet": '<path d="M4 7h15a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a2 2 0 0 1 2-2h11v3"/><path d="M16 13.5h.01"/>',
     "keluar": '<path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h10"/>',
 }
 
@@ -384,6 +489,8 @@ def bar_aksi(*tombol):
 
 # ---------- aplikasi ----------
 
+# Syarat: None = bebas, "login" = cukup masuk, "admin" = khusus admin (kelola user),
+# tuple = butuh salah satu hak akses yang dicentang. Admin selalu punya semua akses.
 ROUTES = {
     ("GET", "/setup"): ("admin_pertama_form", None),
     ("POST", "/setup"): ("admin_pertama", None),
@@ -391,26 +498,25 @@ ROUTES = {
     ("POST", "/login"): ("login", None),
     ("POST", "/logout"): ("logout", "login"),
     ("GET", "/"): ("home", "login"),
-    ("GET", "/produksi"): ("produksi", "login"),
-    ("POST", "/produksi"): ("produksi_tambah", "login"),
-    ("POST", "/produksi/:id/ubah"): ("produksi_ubah", "login"),
-    ("POST", "/produksi/:id/hapus"): ("produksi_hapus", "login"),
-    ("GET", "/sisa"): ("sisa", "admin"),
-    ("POST", "/sisa"): ("sisa_simpan", "admin"),
-    ("GET", "/laporan"): ("laporan", "admin"),
-    ("GET", "/lainnya"): ("lainnya", "admin"),
-    ("GET", "/kue"): ("kue", "admin"),
-    ("POST", "/kue"): ("kue_tambah", "admin"),
-    ("POST", "/kue/:id/ubah"): ("kue_ubah", "admin"),
+    ("GET", "/lainnya"): ("lainnya", "login"),
+    ("GET", "/produksi"): ("produksi", ("produksi",)),
+    ("POST", "/produksi"): ("produksi_tambah", ("produksi",)),
+    ("POST", "/produksi/:id/ubah"): ("produksi_ubah", ("produksi",)),
+    ("POST", "/produksi/:id/hapus"): ("produksi_hapus", ("produksi",)),
+    ("GET", "/sisa"): ("sisa", ("sisa",)),
+    ("POST", "/sisa"): ("sisa_simpan", ("sisa",)),
+    ("GET", "/laporan"): ("laporan", ("omzet", "untung")),
+    ("GET", "/gaji"): ("gaji", ("gaji",)),
+    ("POST", "/gaji/:id/bayar"): ("gaji_bayar", "admin"),
+    ("GET", "/kue"): ("kue", ("kue",)),
+    ("POST", "/kue"): ("kue_tambah", ("kue",)),
+    ("POST", "/kue/:id/ubah"): ("kue_ubah", ("kue",)),
     ("GET", "/pengguna"): ("pengguna", "admin"),
     ("POST", "/pengguna"): ("pengguna_tambah", "admin"),
     ("POST", "/pengguna/:id/password"): ("pengguna_password", "admin"),
+    ("POST", "/pengguna/:id/akses"): ("pengguna_akses", "admin"),
     ("GET", "/riwayat"): ("riwayat", "admin"),
 }
-
-NAV_ADMIN = [("/", "Beranda", "beranda"), ("/produksi", "Produksi", "produksi"), ("/sisa", "Sisa", "sisa"),
-             ("/laporan", "Laporan", "laporan"), ("/lainnya", "Lainnya", "lainnya")]
-
 
 class App(BaseHTTPRequestHandler):
     server_version = "TokoKue/1"
@@ -428,11 +534,12 @@ class App(BaseHTTPRequestHandler):
         if url.path.startswith("/static/fonts/"):
             return self.font(url.path.rsplit("/", 1)[-1])
         self.q = {k: v[0] for k, v in parse_qs(url.query).items()}
-        self.f = {}
+        self.f, self.fl, self.akses = {}, {}, set()
         if method == "POST":
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n).decode("utf-8", "replace")
-            self.f = {k: v[0] for k, v in parse_qs(body, keep_blank_values=True).items()}
+            self.fl = parse_qs(body, keep_blank_values=True)
+            self.f = {k: v[0] for k, v in self.fl.items()}
         parts = url.path.rstrip("/").split("/") or [""]
         self.id = None
         if len(parts) == 4 and parts[2].isdigit():
@@ -452,8 +559,13 @@ class App(BaseHTTPRequestHandler):
             nama, syarat = ROUTES[key]
             if syarat and not self.user:
                 return self.redirect("/login")
-            if syarat == "admin" and self.user["role"] != "admin":
+            if self.user:
+                self.akses = {r[0] for r in self.db.execute(
+                    "SELECT perm FROM user_perms WHERE user_id = ?", (self.user["id"],))}
+            if syarat == "admin" and not self.admin():
                 raise Gagal("Halaman ini khusus admin.", 403)
+            if isinstance(syarat, tuple) and not any(self.boleh(p) for p in syarat):
+                raise Gagal("Kamu belum punya akses untuk ini. Minta admin mencentangnya di menu Pengguna.", 403)
             getattr(self, nama)()
         except Gagal as g:
             back = '<p><a href="javascript:history.back()">Kembali</a></p>'
@@ -506,20 +618,23 @@ class App(BaseHTTPRequestHandler):
 
     def page(self, judul, isi, status=200, alis="", bar="", h1=None):
         u = getattr(self, "user", None)
-        admin = bool(u and u["role"] == "admin")
-        kelas = [] if admin else ["tanpa-nav"]
+        menu = self.menu() if u else []
+        pakai_nav = len(menu) >= 2
+        kelas = [] if pakai_nav else ["tanpa-nav"]
         if bar:
             kelas.append("ada-bar")
         nav = ""
-        if admin:
+        if pakai_nav:
             path = urlparse(self.path).path
-            bagian = {"/kue": "/lainnya", "/pengguna": "/lainnya", "/riwayat": "/lainnya"}.get(path, path)
+            hrefs = [h for h, _, _ in menu]
+            bagian = path if path in hrefs else ("/lainnya" if "/lainnya" in hrefs else "")
             nav = '<nav class="nav" aria-label="Menu utama">' + "".join(
                 f'<a href="{h}"{" aria-current=page" if bagian == h else ""}>{ikon(i)}{t}</a>'
-                for h, t, i in NAV_ADMIN) + "</nav>"
+                for h, t, i in menu) + "</nav>"
         atas = ""
         if u:
-            keluar = "" if admin else ('<form method="post" action="/logout"><button class="biasa">Keluar</button></form>')
+            ada_lainnya = any(h == "/lainnya" for h, _, _ in menu)
+            keluar = "" if ada_lainnya else ('<form method="post" action="/logout"><button class="biasa">Keluar</button></form>')
             atas = f'<div class="atas"><a class="merek" href="/">Toko Kue</a><span class="siapa">{e(u["name"])}</span>{keluar}</div>'
         pesan = kabar("ok", e(self.q["pesan"])) if self.q.get("pesan") else ""
         alis = f'<p class="alis">{alis}</p>' if alis else ""
@@ -531,7 +646,36 @@ class App(BaseHTTPRequestHandler):
 <main>{alis}<h1>{h1 or e(judul)}</h1>{pesan}{isi}</main>{bar}{nav}<script>{JS}</script></body></html>""")
 
     def admin(self):
-        return self.user["role"] == "admin"
+        return bool(self.user) and self.user["role"] == "admin"
+
+    def boleh(self, perm):
+        return self.admin() or perm in self.akses
+
+    def menu(self):
+        """Menu bawah sesuai hak akses. Lebih dari 5 item -> sisanya masuk 'Lainnya'."""
+        utama = [("/", "Beranda", "beranda", True), ("/produksi", "Produksi", "produksi", self.boleh("produksi")),
+                 ("/sisa", "Sisa", "sisa", self.boleh("sisa")),
+                 ("/laporan", "Laporan", "laporan", self.boleh("omzet") or self.boleh("untung"))]
+        items = [(h, t, i) for h, t, i, ok in utama if ok]
+        tambahan = self.menu_lainnya()
+        if self.admin() or len(tambahan) > 1:
+            items.append(("/lainnya", "Lainnya", "lainnya"))
+        elif tambahan:
+            h, i, t, _ = tambahan[0]
+            items.append((h, t.split(" ")[0], i))
+        return items
+
+    def menu_lainnya(self):
+        m = []
+        if self.boleh("gaji"):
+            m.append(("/gaji", "dompet", "Gaji", "Gaji berjalan, tandai sudah dibayar, riwayat" if self.admin()
+                      else "Gaji berjalan dan riwayat pembayaranmu"))
+        if self.boleh("kue"):
+            m.append(("/kue", "kue", "Daftar kue dan harga", "Tambah kue, ubah harga"))
+        if self.admin():
+            m += [("/pengguna", "orang", "Pengguna dan akses", "Tambah karyawan, centang akses, persen gaji, password"),
+                  ("/riwayat", "jam", "Riwayat perubahan", "Siapa mengubah apa dan kapan")]
+        return m
 
     # --- setup & login ---
 
@@ -566,8 +710,8 @@ class App(BaseHTTPRequestHandler):
             raise Gagal("Password minimal 6 huruf.")
         try:
             with self.db:
-                cur = self.db.execute("INSERT INTO users(username, name, pw, role) VALUES(?,?,?,?)",
-                                      (username, name, hash_pw(pw), role))
+                cur = self.db.execute("INSERT INTO users(username, name, pw, role, gaji_mulai) VALUES(?,?,?,?,?)",
+                                      (username, name, hash_pw(pw), role, today()))
                 catat(self.db, getattr(self, "user", None) and self.user["id"], "tambah pengguna",
                       f"{username} ({role})")
         except sqlite3.IntegrityError:
@@ -599,45 +743,61 @@ class App(BaseHTTPRequestHandler):
             self.db.execute("DELETE FROM sessions WHERE token = ?", (c["sesi"].value,))
         self.redirect("/login", headers=[("Set-Cookie", "sesi=; Path=/; Max-Age=0")])
 
-    # --- beranda (admin) ---
+    # --- beranda (semua user; isi sesuai hak akses) ---
 
     def home(self):
-        if not self.admin():
-            return self.redirect("/produksi")
         tgl = today()
+        boleh_omzet, boleh_untung = self.boleh("omzet"), self.boleh("untung")
+        if not self.admin() and self.akses == {"produksi"}:
+            return self.redirect("/produksi")
         lp = laporan_harian(self.db, tgl)
         t = lp["total"]
-        isi = f"""<section class="utama-blok" aria-label="Omzet hari ini">
-          <div class="label">Omzet hari ini</div>
-          <div class="angka">{rp_besar(t['omzet'])}</div>
-          <div class="sub">{t['terjual']} kue terjual dari {t['dibuat']} dibuat</div></section>
-          <div class="duo">
-            <div><div class="label">Untung</div><div class="nilai untung">{rupiah(t['untung'])}</div></div>
-            <div><div class="label">Rugi dari sisa</div><div class="nilai rugi">{rupiah(t['kerugian'])}</div></div></div>"""
-        if not lp["items"]:
-            isi += '<h2>Status</h2>' + kabar("awas", "Belum ada produksi hari ini.")
-        elif lp["sisa_belum"]:
-            isi += '<h2>Status</h2>' + kabar(
-                "awas", f'Sisa belum diisi untuk {len(lp["sisa_belum"])} kue. Sampai diisi, semua dianggap terjual.')
-        else:
-            isi += '<h2>Status</h2>' + kabar("ok", "Sisa hari ini sudah diisi.")
-        if lp["items"]:
-            isi += '<h2>Per kue</h2><ul class="daftar">'
-            for i in lp["items"]:
-                s = i["sisa"] if i["sisa_diisi"] else "belum"
-                isi += f"""<li class="baris"><div><div class="nama">{e(i['nama'])}</div>
-                  <div class="info"><span>dibuat {i['dibuat']}</span><span>sisa {s}</span></div></div>
-                  <div class="kanan"><div class="qty">{i['terjual']}</div><div class="kecil">terjual</div></div></li>"""
-            isi += "</ul>"
-        isi += f'<p style="margin-top:20px"><a href="/laporan?tanggal={tgl}">Laporan harian lengkap</a></p>'
-        bar = bar_aksi('<a class="tombol" href="/produksi">Catat produksi</a>',
-                       f'<a class="tombol garis" href="/sisa">Catat sisa tutup</a>')
+        isi = ""
+        if boleh_omzet:
+            isi += f"""<section class="utama-blok" aria-label="Omzet hari ini">
+              <div class="label">Omzet hari ini</div>
+              <div class="angka">{rp_besar(t['omzet'])}</div>
+              <div class="sub">{t['terjual']} kue terjual dari {t['dibuat']} dibuat</div></section>"""
+        if boleh_untung:
+            isi += f"""<div class="duo">
+              <div><div class="label">Untung</div><div class="nilai untung">{rupiah(t['untung'])}</div></div>
+              <div><div class="label">Rugi dari sisa</div><div class="nilai rugi">{rupiah(t['kerugian'])}</div></div></div>"""
+        if self.boleh("gaji") and not self.admin():
+            g = gaji_info(self.db, self.user)
+            isi += f"""<div class="duo"><div><div class="label">Gaji berjalan</div>
+              <div class="nilai">{rupiah(g['jumlah'])}</div></div>
+              <div><div class="label">Sejak</div><div class="nilai" style="font-size:20px">{tgl_indo(g['mulai']) if not g['sudah_lunas'] else 'baru dibayar'}</div></div></div>
+              <p style="margin-top:12px"><a href="/gaji">Lihat rincian gaji</a></p>"""
+        if self.admin() or boleh_omzet or boleh_untung or self.boleh("sisa"):
+            if not lp["items"]:
+                isi += '<h2>Status</h2>' + kabar("awas", "Belum ada produksi hari ini.")
+            elif lp["sisa_belum"]:
+                isi += '<h2>Status</h2>' + kabar(
+                    "awas", f'Sisa belum diisi untuk {len(lp["sisa_belum"])} kue. Sampai diisi, semua dianggap terjual.')
+            else:
+                isi += '<h2>Status</h2>' + kabar("ok", "Sisa hari ini sudah diisi.")
+            if lp["items"]:
+                isi += '<h2>Per kue</h2><ul class="daftar">'
+                for i in lp["items"]:
+                    s = i["sisa"] if i["sisa_diisi"] else "belum"
+                    isi += f"""<li class="baris"><div><div class="nama">{e(i['nama'])}</div>
+                      <div class="info"><span>dibuat {i['dibuat']}</span><span>sisa {s}</span></div></div>
+                      <div class="kanan"><div class="qty">{i['terjual']}</div><div class="kecil">terjual</div></div></li>"""
+                isi += "</ul>"
+        if boleh_omzet or boleh_untung:
+            isi += f'<p style="margin-top:20px"><a href="/laporan?tanggal={tgl}">Laporan harian lengkap</a></p>'
+        if not isi:
+            isi = kabar("awas", "Akunmu belum punya akses apa pun. Minta admin mencentang akses untukmu.")
+        tombol = []
+        if self.boleh("produksi"):
+            tombol.append('<a class="tombol" href="/produksi">Catat produksi</a>')
+        if self.boleh("sisa"):
+            tombol.append(f'<a class="tombol{" garis" if tombol else ""}" href="/sisa">Catat sisa tutup</a>')
+        bar = bar_aksi(*tombol) if tombol else ""
         self.page("Beranda", isi, alis=tgl_indo(tgl), bar=bar, h1="Hari ini")
 
     def lainnya(self):
-        menu = [("/kue", "kue", "Daftar kue dan harga", "Tambah kue, ubah harga jual dan modal"),
-                ("/pengguna", "orang", "Pengguna", "Tambah karyawan, buatkan password baru"),
-                ("/riwayat", "jam", "Riwayat perubahan", "Siapa mengubah apa dan kapan")]
+        menu = self.menu_lainnya()
         isi = '<ul class="daftar">' + "".join(
             f"""<li><a class="baris" href="{h}" style="color:inherit;text-decoration:none;min-height:48px">{ikon(i)}
               <span><span class="nama">{t}</span><span class="info" style="margin:2px 0 0">{d}</span></span>
@@ -738,12 +898,13 @@ class App(BaseHTTPRequestHandler):
     # --- sisa (admin) ---
 
     def sisa(self):
-        tgl = tanggal(self.q.get("tanggal") or today())
+        # Non-admin dengan akses "input sisa" hanya untuk hari ini; tanggal lain khusus admin.
+        tgl = tanggal(self.q["tanggal"]) if self.admin() and self.q.get("tanggal") else today()
         rows = self.db.execute("""SELECT c.id, c.name, SUM(p.qty) dibuat,
               (SELECT qty FROM leftover l WHERE l.cake_id = c.id AND l.date = :d) sisa
             FROM production p JOIN cakes c ON c.id = p.cake_id WHERE p.date = :d
             GROUP BY c.id ORDER BY c.name""", {"d": tgl}).fetchall()
-        isi = form_tanggal("/sisa", tgl)
+        isi = form_tanggal("/sisa", tgl) if self.admin() else ""
         bar = ""
         if not rows:
             isi += kabar("awas", "Belum ada produksi di tanggal ini.")
@@ -761,6 +922,8 @@ class App(BaseHTTPRequestHandler):
 
     def sisa_simpan(self):
         tgl = tanggal(self.f.get("tanggal"))
+        if not self.admin() and tgl != today():
+            raise Gagal("Sisa tanggal lain hanya bisa diubah admin.", 403)
         rows = self.db.execute("""SELECT c.id, c.name, SUM(p.qty) dibuat,
               (SELECT qty FROM leftover l WHERE l.cake_id = c.id AND l.date = :d) lama
             FROM production p JOIN cakes c ON c.id = p.cake_id WHERE p.date = :d GROUP BY c.id""",
@@ -778,71 +941,183 @@ class App(BaseHTTPRequestHandler):
                     ON CONFLICT(date, cake_id) DO UPDATE SET qty = excluded.qty, user_id = excluded.user_id,
                     updated = excluded.updated""", (tgl, r["id"], n, self.user["id"], stamp()))
                 catat(self.db, self.user["id"], "ubah sisa", f"{tgl} {r['name']}: {r['lama']} -> {n}")
-        self.redirect(f"/laporan?tanggal={tgl}", "Sisa tersimpan.")
+        tujuan = f"/laporan?tanggal={tgl}" if (self.boleh("omzet") or self.boleh("untung")) else "/"
+        self.redirect(tujuan, "Sisa tersimpan.")
 
-    # --- laporan (admin) ---
+    # --- laporan (omzet / untung) ---
+
+    def rentang_laporan(self):
+        """Baca filter: hari (tanggal), 7 hari, bulan ini, atau rentang (dari-sampai)."""
+        hari_ini = today()
+        periode = self.q.get("periode") or "hari"
+        if periode == "7":
+            return periode, (date.fromisoformat(hari_ini) - timedelta(days=6)).isoformat(), hari_ini
+        if periode == "bulan":
+            return periode, hari_ini[:8] + "01", hari_ini
+        if periode == "rentang":
+            dari = tanggal(self.q.get("dari") or hari_ini)
+            sampai = tanggal(self.q.get("sampai") or hari_ini)
+            if dari > sampai:
+                raise Gagal("Tanggal awal harus sebelum tanggal akhir.")
+            if (date.fromisoformat(sampai) - date.fromisoformat(dari)).days > 366:
+                raise Gagal("Rentang maksimal 1 tahun.")
+            return periode, dari, sampai
+        tgl = tanggal(self.q.get("tanggal") or hari_ini)
+        return "hari", tgl, tgl
 
     def laporan(self):
-        tgl = tanggal(self.q.get("tanggal") or today())
-        lp = laporan_harian(self.db, tgl)
+        periode, dari, sampai = self.rentang_laporan()
+        lp = laporan_rentang(self.db, dari, sampai)
         t = lp["total"]
-        isi = form_tanggal("/laporan", tgl)
+        boleh_omzet, boleh_untung = self.boleh("omzet"), self.boleh("untung")
+        pilihan = [("hari", "Hari ini", f"/laporan?tanggal={today()}"), ("7", "7 hari", "/laporan?periode=7"),
+                   ("bulan", "Bulan ini", "/laporan?periode=bulan"),
+                   ("rentang", "Rentang", f"/laporan?periode=rentang&dari={dari}&sampai={sampai}")]
+        isi = '<nav class="pilih" aria-label="Pilih periode">' + "".join(
+            f'<a href="{h}"{" aria-current=true" if periode == p else ""}>{t_}</a>' for p, t_, h in pilihan) + "</nav>"
+        if periode == "hari":
+            isi += form_tanggal("/laporan", dari)
+        elif periode == "rentang":
+            isi += f"""<form class="rentang" method="get" action="/laporan"><input type="hidden" name="periode" value="rentang">
+              <div><label for="dari">Dari</label><input id="dari" type="date" name="dari" value="{dari}"></div>
+              <div><label for="sampai">Sampai</label><input id="sampai" type="date" name="sampai" value="{sampai}"></div>
+              <button class="tombol sedang">Tampilkan</button></form>"""
+        judul = "Laporan harian" if periode == "hari" else "Laporan"
+        alis = tgl_indo(dari) if dari == sampai else f"{tgl_indo(dari)} – {tgl_indo(sampai)}"
         if not lp["items"]:
-            return self.page("Laporan harian", isi + kabar("awas", "Belum ada produksi di tanggal ini."), alis=tgl_indo(tgl))
+            return self.page(judul, isi + kabar("awas", "Belum ada produksi di periode ini."), alis=alis)
         if lp["sisa_belum"]:
-            isi += kabar("awas", f'Sisa belum diisi untuk: {e(", ".join(lp["sisa_belum"]))}. Sampai diisi, semua dianggap terjual. '
-                                 f'<a href="/sisa?tanggal={tgl}">Isi sisa</a>')
+            daftar = ", ".join(f"{n}" if dari == sampai else f"{n} ({tgl_indo(d)[-11:]})" for d, n in lp["sisa_belum"][:6])
+            lebih = f" dan {len(lp['sisa_belum']) - 6} lagi" if len(lp["sisa_belum"]) > 6 else ""
+            link = f' <a href="/sisa?tanggal={lp["sisa_belum"][0][0]}">Isi sisa</a>' if self.boleh("sisa") else ""
+            isi += kabar("awas", f"Sisa belum diisi untuk: {e(daftar)}{lebih}. Sampai diisi, kue itu dianggap terjual semua.{link}")
+        if boleh_omzet:
+            isi += f"""<section class="besar" style="margin-top:12px"><div class="label">Omzet</div>
+              <div class="angka">{rp_besar(t['omzet'])}</div></section>"""
+        if boleh_untung:
+            isi += f"""<div class="duo">
+              <div><div class="label">Untung*</div><div class="nilai untung">{rupiah(t['untung'])}</div></div>
+              <div><div class="label">Rugi dari sisa</div><div class="nilai rugi">{rupiah(t['kerugian'])}</div></div></div>"""
         laku = f'{e(lp["laku"]["nama"])} <span class="kecil">· {lp["laku"]["terjual"]} terjual</span>' if lp["laku"] else "-"
-        bsisa = (f'{e(lp["banyak_sisa"]["nama"])} <span class="kecil">· sisa {lp["banyak_sisa"]["sisa"]}</span>'
-                 if lp["banyak_sisa"] else "-")
-        isi += f"""<section class="besar" style="margin-top:12px"><div class="label">Omzet</div>
-          <div class="angka">{rp_besar(t['omzet'])}</div></section>
-          <div class="duo">
-            <div><div class="label">Untung*</div><div class="nilai untung">{rupiah(t['untung'])}</div></div>
-            <div><div class="label">Rugi dari sisa</div><div class="nilai rugi">{rupiah(t['kerugian'])}</div></div></div>
-          <div class="duo">
+        ss = lp["sering_sisa"]
+        if ss and dari == sampai:
+            sering = f'{e(ss["nama"])} <span class="kecil">· sisa {ss["sisa"]}</span>'
+        elif ss:
+            sering = f'{e(ss["nama"])} <span class="kecil">· {ss["hari_sisa"]} hari, total {ss["sisa"]}</span>'
+        else:
+            sering = "-"
+        isi += f"""<div class="duo">
             <div><div class="label">Terjual</div><div class="nilai">{t['terjual']}</div></div>
             <div><div class="label">Sisa</div><div class="nilai">{t['sisa']}</div></div></div>
-          <ul class="daftar" style="border-top:0">
-            <li class="baris"><span class="kecil" style="min-width:150px">Untung setelah sisa*</span><span class="kanan" style="font-weight:800">{rupiah(t['untung_bersih'])}</span></li>
-            <li class="baris"><span class="kecil" style="min-width:150px">Paling laku</span><span class="kanan" style="font-weight:700">{laku}</span></li>
-            <li class="baris"><span class="kecil" style="min-width:150px">Paling banyak sisa</span><span class="kanan" style="font-weight:700">{bsisa}</span></li></ul>
-          <p class="bantu">*Untung = omzet − (terjual × harga modal). Untung setelah sisa = untung − rugi dari sisa.
-          Rumus untung masih menunggu konfirmasi pemilik.</p>"""
+          <ul class="daftar" style="border-top:0">"""
+        if boleh_untung:
+            isi += f"""<li class="baris"><span class="kecil" style="min-width:150px">Untung setelah sisa*</span><span class="kanan" style="font-weight:800">{rupiah(t['untung_bersih'])}</span></li>"""
+        isi += f"""<li class="baris"><span class="kecil" style="min-width:150px">Paling laku</span><span class="kanan" style="font-weight:700">{laku}</span></li>
+            <li class="baris"><span class="kecil" style="min-width:150px">{"Paling banyak sisa" if dari == sampai else "Paling sering sisa"}</span><span class="kanan" style="font-weight:700">{sering}</span></li></ul>"""
+        if dari != sampai:
+            isi += f'<p class="bantu">{len(lp["hari"])} hari ada produksi di periode ini.</p>'
+        if boleh_untung:
+            isi += """<p class="bantu">*Untung = omzet − (terjual × harga modal). Untung setelah sisa = untung − rugi dari sisa.
+              Rumus untung masih menunggu konfirmasi pemilik. Gaji belum dikurangkan.</p>"""
         isi += '<h2>Per kue</h2><ul class="daftar">'
         for i in lp["items"]:
-            s = i["sisa"] if i["sisa_diisi"] else "belum diisi"
-            isi += f"""<li><div class="baris"><span class="nama">{e(i['nama'])}</span><span class="kanan" style="font-weight:800">{rupiah(i['omzet'])}</span></div>
-              <div class="info"><span>dibuat {i['dibuat']}</span><span>sisa {s}</span><span>terjual {i['terjual']}</span>
-              <span>@ {rupiah(i['harga_jual'])}</span></div>
-              <div class="info"><span class="untung">untung {rupiah(i['untung'])}</span><span style="color:var(--terra-text)">rugi sisa {rupiah(i['kerugian'])}</span></div></li>"""
-        isi += f"""<li><div class="baris"><span class="nama">Total</span><span class="kanan" style="font-weight:800">{rupiah(t['omzet'])}</span></div>
+            kanan = f'<span class="kanan" style="font-weight:800">{rupiah(i["omzet"])}</span>' if boleh_omzet else \
+                f'<span class="kanan qty">{i["terjual"]}</span>'
+            uang = ""
+            if boleh_untung:
+                uang = (f'<div class="info"><span class="untung">untung {rupiah(i["untung"])}</span>'
+                        f'<span style="color:var(--terra-text)">rugi sisa {rupiah(i["kerugian"])}</span></div>')
+            isi += f"""<li><div class="baris"><span class="nama">{e(i['nama'])}</span>{kanan}</div>
+              <div class="info"><span>dibuat {i['dibuat']}</span><span>sisa {i['sisa']}</span><span>terjual {i['terjual']}</span></div>{uang}</li>"""
+        total_kanan = f'<span class="kanan" style="font-weight:800">{rupiah(t["omzet"])}</span>' if boleh_omzet else ""
+        isi += f"""<li><div class="baris"><span class="nama">Total</span>{total_kanan}</div>
           <div class="info"><span>dibuat {t['dibuat']}</span><span>sisa {t['sisa']}</span><span>terjual {t['terjual']}</span></div></li></ul>"""
-        self.page("Laporan harian", isi, alis=tgl_indo(tgl))
+        self.page(judul, isi, alis=alis)
 
-    # --- kue (admin) ---
+    # --- gaji ---
+
+    def gaji(self):
+        if self.admin():
+            orang = self.db.execute("SELECT * FROM users WHERE role = 'karyawan' ORDER BY name").fetchall()
+        else:
+            orang = [self.user]
+        if not orang:
+            return self.page("Gaji", kabar("awas", "Belum ada karyawan. Tambah di menu Pengguna dan akses."))
+        isi = ""
+        for u in orang:
+            g = gaji_info(self.db, u)
+            periode = "Sudah dibayar sampai hari ini." if g["sudah_lunas"] else \
+                f"{tgl_indo(g['mulai'])} – {tgl_indo(g['sampai'])}"
+            isi += f"""<section class="gaji-blok"><div class="baris"><span class="nama">{e(u['name'])}</span>
+                <span class="kanan kecil">{g['pct']}% dari omzet</span></div>
+              <div class="besar"><div class="angka">{rp_besar(g['jumlah'])}</div></div>
+              <div class="info"><span>{periode}</span><span>omzet {rupiah(g['omzet'])}</span></div>"""
+            if g["sisa_belum"]:
+                isi += kabar("awas", f"Sisa belum diisi di {len(g['sisa_belum'])} catatan. Gaji bisa turun setelah sisa diisi.")
+            if self.admin() and not g["sudah_lunas"]:
+                isi += f"""<form method="post" action="/gaji/{u['id']}/bayar"
+                  onsubmit="return confirm('Tandai gaji {e(u['name'])} {rupiah(g['jumlah'])} sudah dibayar? Hitungan mulai lagi dari nol besok.')">
+                  <input type="hidden" name="jumlah" value="{g['jumlah']}">
+                  <button class="tombol penuh" style="margin-top:12px">Tandai sudah dibayar</button></form>
+                  <p class="bantu">Tekan setelah sisa hari ini diisi. Penjualan sampai hari ini masuk pembayaran ini.</p>"""
+            riwayat = self.db.execute("""SELECT * FROM wage_payments WHERE user_id = ? ORDER BY id DESC LIMIT 24""",
+                                      (u["id"],)).fetchall()
+            if riwayat:
+                isi += '<h2>Riwayat pembayaran</h2><ul class="daftar">' + "".join(
+                    f"""<li><div class="baris"><span class="nama" style="font-size:16px">{tgl_indo(r['period_start'])[-11:]} – {tgl_indo(r['period_end'])[-11:]}</span>
+                      <span class="kanan" style="font-weight:800">{rupiah(r['amount'])}</span></div>
+                      <div class="info"><span>dibayar {r['paid_at'][:10]}</span><span>{r['pct']}% × {rupiah(r['omzet'])}</span></div></li>"""
+                    for r in riwayat) + "</ul>"
+            isi += "</section>"
+        isi += '<p class="bantu">Gaji = persen × harga jual kue yang terjual (harga saat dicatat). Belum dikurangkan dari untung.</p>'
+        self.page("Gaji", isi, alis="Gaji berjalan")
+
+    def gaji_bayar(self):
+        u = self.db.execute("SELECT * FROM users WHERE id = ? AND role = 'karyawan'", (self.id,)).fetchone()
+        if not u:
+            raise Gagal("Karyawan tidak ditemukan.", 404)
+        g = gaji_info(self.db, u)
+        if g["sudah_lunas"]:
+            raise Gagal("Gaji sudah ditandai dibayar sampai hari ini.")
+        if angka(self.f.get("jumlah"), "Jumlah") != g["jumlah"]:
+            raise Gagal("Angka gaji berubah sejak halaman dibuka. Muat ulang halaman Gaji lalu coba lagi.", 409)
+        with self.db:
+            self.db.execute("""INSERT INTO wage_payments(user_id, period_start, period_end, omzet, pct, amount, paid_at, paid_by)
+                VALUES(?,?,?,?,?,?,?,?)""", (u["id"], g["mulai"], g["sampai"], g["omzet"], g["pct"], g["jumlah"], stamp(),
+                                             self.user["id"]))
+            catat(self.db, self.user["id"], "gaji dibayar",
+                  f"{u['username']} {g['mulai']}..{g['sampai']}: {g['pct']}% x {g['omzet']} = {g['jumlah']}")
+        self.redirect("/gaji", f"Gaji {u['name']} {rupiah(g['jumlah'])} ditandai sudah dibayar.")
+
+    # --- kue ---
 
     def kue(self):
         rows = self.db.execute("SELECT * FROM cakes ORDER BY active DESC, name").fetchall()
+        modal = self.boleh("modal")
         buka = "" if rows else " open"
+        isian_modal = ('<label for="km">Harga modal</label><input id="km" name="price_cost" inputmode="numeric" required placeholder="3000">'
+                       if modal else '<p class="bantu">Harga modal diisi oleh admin.</p>')
         isi = f"""<details class="tambah"{buka}><summary><span class="tombol garis sedang">{ikon("plus")}Tambah kue</span></summary>
           <div class="panel"><form method="post" action="/kue">
           <label for="kn">Nama kue</label><input id="kn" name="name" required>
           <label for="kj">Harga jual</label><input id="kj" name="price_sell" inputmode="numeric" required placeholder="5000">
-          <label for="km">Harga modal</label><input id="km" name="price_cost" inputmode="numeric" required placeholder="3000">
+          {isian_modal}
           <button class="tombol penuh" style="margin-top:20px">Simpan kue</button></form></div></details>"""
         if rows:
             isi += '<ul class="daftar" style="margin-top:16px">'
         for k in rows:
             cek = "checked" if k["active"] else ""
             status = "" if k["active"] else ' <span class="kecil">· tidak dijual</span>'
+            info_modal = (f" · modal {rupiah(k['price_cost'])}" if k["price_cost"] else " · modal belum diisi") if modal else ""
+            ubah_modal = (f"""<label for="m{k['id']}">Harga modal</label><input id="m{k['id']}" name="price_cost" value="{k['price_cost']}" inputmode="numeric" required>"""
+                          if modal else "")
             isi += f"""<li><details><summary><div class="baris"><span><span class="nama">{e(k['name'])}</span>{status}
-                <span class="info" style="margin:2px 0 0">jual {rupiah(k['price_sell'])} · modal {rupiah(k['price_cost'])}</span></span>
+                <span class="info" style="margin:2px 0 0">jual {rupiah(k['price_sell'])}{info_modal}</span></span>
                 <span class="kanan biasa">Ubah</span></div></summary>
               <div class="panel"><form method="post" action="/kue/{k['id']}/ubah">
               <label for="n{k['id']}">Nama kue</label><input id="n{k['id']}" name="name" value="{e(k['name'])}" required>
               <label for="j{k['id']}">Harga jual</label><input id="j{k['id']}" name="price_sell" value="{k['price_sell']}" inputmode="numeric" required>
-              <label for="m{k['id']}">Harga modal</label><input id="m{k['id']}" name="price_cost" value="{k['price_cost']}" inputmode="numeric" required>
+              {ubah_modal}
               <label style="display:flex;gap:10px;align-items:center;font-weight:500"><input type="checkbox" name="active" value="1" {cek} style="width:24px;height:24px;accent-color:var(--crust)"> Masih dijual</label>
               <p class="bantu">Harga baru hanya berlaku untuk batch berikutnya. Catatan lama tetap.</p>
               <button class="tombol penuh" style="margin-top:12px">Simpan perubahan</button></form></div></details></li>"""
@@ -850,11 +1125,12 @@ class App(BaseHTTPRequestHandler):
             isi += "</ul>"
         self.page("Daftar kue dan harga", isi)
 
-    def isian_kue(self):
+    def isian_kue(self, modal_lama=0):
         name = self.f.get("name", "").strip()
         if not name:
             raise Gagal("Nama kue wajib diisi.")
-        return name, angka(self.f.get("price_sell"), "Harga jual"), angka(self.f.get("price_cost"), "Harga modal")
+        hm = angka(self.f.get("price_cost"), "Harga modal") if self.boleh("modal") else modal_lama
+        return name, angka(self.f.get("price_sell"), "Harga jual"), hm
 
     def kue_tambah(self):
         name, hj, hm = self.isian_kue()
@@ -870,7 +1146,7 @@ class App(BaseHTTPRequestHandler):
         lama = self.db.execute("SELECT * FROM cakes WHERE id = ?", (self.id,)).fetchone()
         if not lama:
             raise Gagal("Kue tidak ditemukan.", 404)
-        name, hj, hm = self.isian_kue()
+        name, hj, hm = self.isian_kue(modal_lama=lama["price_cost"])
         aktif = 1 if self.f.get("active") else 0
         try:
             with self.db:
@@ -883,32 +1159,89 @@ class App(BaseHTTPRequestHandler):
             raise Gagal("Nama kue sudah ada.")
         self.redirect("/kue", f"{name} disimpan.")
 
-    # --- pengguna (admin) ---
+    # --- pengguna dan akses (khusus admin) ---
+
+    def kotak_akses(self, punya, awal=""):
+        kotak = "".join(
+            f"""<label class="centang"><input type="checkbox" name="akses" value="{k}"{' checked' if k in punya else ''}>
+              <span>{t}</span></label>""" for k, t in PERMS)
+        kotak += '<label class="centang mati"><input type="checkbox" disabled><span>Kelola user <small>(khusus admin)</small></span></label>'
+        return f'<fieldset class="akses"><legend class="lbl">Akses</legend>{kotak}</fieldset>'
 
     def pengguna(self):
         rows = self.db.execute("SELECT * FROM users ORDER BY role, name").fetchall()
+        akses = {}
+        for r in self.db.execute("SELECT user_id, perm FROM user_perms"):
+            akses.setdefault(r[0], set()).add(r[1])
         isi = f"""<details class="tambah"><summary><span class="tombol garis sedang">{ikon("plus")}Tambah karyawan</span></summary>
           <div class="panel"><form method="post" action="/pengguna">
           <label for="pn">Nama</label><input id="pn" name="name" required>
           <label for="pu">Username</label><input id="pu" name="username" required autocapitalize="none">
           <label for="pp">Password</label><input id="pp" name="password" type="password" required minlength="6" autocomplete="new-password">
           <p class="bantu">Minimal 6 huruf. Berikan langsung ke karyawan.</p>
+          {self.kotak_akses(set())}
+          <button type="button" class="biasa" data-preset="{",".join(AKSES_KAKAK)}">Centang akses pembuat kue</button>
+          <label for="pg">Persen gaji</label><input id="pg" name="pct" value="{GAJI_PERSEN_DEFAULT}" inputmode="numeric" style="max-width:120px">
+          <p class="bantu">Karyawan baru mulai tanpa akses sampai kamu centang.</p>
           <button class="tombol penuh" style="margin-top:16px">Simpan karyawan</button></form></div></details>
           <ul class="daftar" style="margin-top:16px">"""
         for u in rows:
+            punya = akses.get(u["id"], set())
+            if u["role"] == "admin":
+                ringkas, form_akses = "admin · semua akses", '<p class="bantu">Admin selalu punya semua akses, termasuk kelola user.</p>'
+            else:
+                label = [t for k, t in PERMS if k in punya]
+                ringkas = (", ".join(label) if label else "belum ada akses") + f" · gaji {u['pct']}%"
+                form_akses = f"""<form method="post" action="/pengguna/{u['id']}/akses">{self.kotak_akses(punya)}
+                  <label for="pg{u['id']}">Persen gaji</label>
+                  <input id="pg{u['id']}" name="pct" value="{u['pct']}" inputmode="numeric" style="max-width:120px">
+                  <button class="tombol penuh" style="margin-top:16px">Simpan akses</button></form>"""
             isi += f"""<li><details><summary><div class="baris"><span><span class="nama">{e(u['name'])}</span>
-              <span class="info" style="margin:2px 0 0">{e(u['username'])} · {u['role']}</span></span>
-              <span class="kanan biasa">Password baru</span></div></summary>
-              <div class="panel"><form method="post" action="/pengguna/{u['id']}/password">
+              <span class="info" style="margin:2px 0 0">{e(u['username'])} · {e(ringkas)}</span></span>
+              <span class="kanan biasa">Atur</span></div></summary>
+              <div class="panel">{form_akses}
+              <form method="post" action="/pengguna/{u['id']}/password">
               <label for="pw{u['id']}">Password baru untuk {e(u['name'])}</label>
               <input id="pw{u['id']}" name="password" type="password" minlength="6" required autocomplete="new-password">
-              <button class="tombol penuh" style="margin-top:16px">Ganti password</button></form></div></details></li>"""
-        isi += '</ul><p class="bantu">Versi 1: karyawan hanya bisa input produksi. Hak akses per orang menyusul di fase 2.</p>'
-        self.page("Pengguna", isi)
+              <button class="tombol garis penuh" style="margin-top:16px">Ganti password</button></form></div></details></li>"""
+        isi += "</ul>"
+        self.page("Pengguna dan akses", isi)
+
+    def isian_akses(self):
+        diminta = set(self.fl.get("akses", []))
+        if diminta - PERM_KEYS:
+            raise Gagal("Akses tidak dikenal: " + ", ".join(sorted(diminta - PERM_KEYS)) + ". Kelola user khusus admin.")
+        pct = angka(self.f.get("pct") or str(GAJI_PERSEN_DEFAULT), "Persen gaji")
+        if pct > 100:
+            raise Gagal("Persen gaji maksimal 100.")
+        return diminta, pct
+
+    def simpan_akses(self, uid, akses, pct):
+        self.db.execute("DELETE FROM user_perms WHERE user_id = ?", (uid,))
+        self.db.executemany("INSERT INTO user_perms(user_id, perm) VALUES(?,?)", [(uid, p) for p in sorted(akses)])
+        self.db.execute("UPDATE users SET pct = ? WHERE id = ?", (pct, uid))
 
     def pengguna_tambah(self):
-        self.buat_user("karyawan")
+        akses, pct = self.isian_akses()
+        uid = self.buat_user("karyawan")
+        with self.db:
+            self.simpan_akses(uid, akses, pct)
+            catat(self.db, self.user["id"], "ubah akses", f"user #{uid}: {', '.join(sorted(akses)) or 'tanpa akses'}; gaji {pct}%")
         self.redirect("/pengguna", "Karyawan ditambahkan.")
+
+    def pengguna_akses(self):
+        u = self.db.execute("SELECT * FROM users WHERE id = ?", (self.id,)).fetchone()
+        if not u:
+            raise Gagal("Pengguna tidak ditemukan.", 404)
+        if u["role"] == "admin":
+            raise Gagal("Akses admin tidak bisa diubah: admin selalu punya semua akses.")
+        akses, pct = self.isian_akses()
+        lama = {r[0] for r in self.db.execute("SELECT perm FROM user_perms WHERE user_id = ?", (u["id"],))}
+        with self.db:
+            self.simpan_akses(u["id"], akses, pct)
+            catat(self.db, self.user["id"], "ubah akses",
+                  f"{u['username']}: {', '.join(sorted(lama)) or '-'} -> {', '.join(sorted(akses)) or '-'}; gaji {u['pct']}% -> {pct}%")
+        self.redirect("/pengguna", f"Akses {u['name']} disimpan.")
 
     def pengguna_password(self):
         u = self.db.execute("SELECT * FROM users WHERE id = ?", (self.id,)).fetchone()

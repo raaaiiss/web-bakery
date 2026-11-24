@@ -60,7 +60,7 @@ class TestTokoKue(unittest.TestCase):
 
         admin.post("/kue", name="Donat", price_sell="5.000", price_cost="3000")
         admin.post("/kue", name="Roti Coklat", price_sell="8000", price_cost="5000")
-        admin.post("/pengguna", name="Kakak", username="kakak", password="kakak123")
+        admin.post("/pengguna", name="Kakak", username="kakak", password="kakak123", akses="produksi")  # fase 2: user baru tanpa akses
 
         kakak = Klien(self.base)
         s, body = kakak.post("/login", username="kakak", password="kakak123")
