@@ -1165,7 +1165,7 @@ class App(BaseHTTPRequestHandler):
               <div class="nilai">{rupiah(g['saldo'])}</div></div>
               <div><div class="label">Sejak</div><div class="nilai" style="font-size:20px">{tgl_indo(g['mulai']) if not g['sudah_lunas'] else 'baru dibayar'}</div></div></div>"""
             if h:
-                isi += f"""<div class="baris hari-ini"><span>Gaji hari ini {lencana(h['sementara'])}</span>
+                isi += f"""<div class="baris hari-ini"><span>Gaji hari ini {lencana(h['sementara']) if h['ada_produksi'] else ''}</span>
                   <b class="kanan">{rupiah(h['jumlah'])}</b></div>"""
 
         # 3. Laporan harian singkat + kue terlaris
@@ -1597,7 +1597,7 @@ class App(BaseHTTPRequestHandler):
         if h:
             ket = ("belum ada kue dibuat hari ini" if not h["ada_produksi"] else
                    f"sisa {h['sisa_belum']} kue belum diisi, dianggap terjual" if h["sementara"] else "sisa hari ini sudah diisi")
-            isi += f"""<div class="baris hari-ini"><span>Gaji hari ini {lencana(h['sementara'])}</span>
+            isi += f"""<div class="baris hari-ini"><span>Gaji hari ini {lencana(h['sementara']) if h['ada_produksi'] else ''}</span>
               <b class="kanan">{rupiah(h['jumlah'])}</b></div><p class="bantu" style="margin-top:0">{ket}</p>"""
         if g["sisa_belum"]:
             isi += kabar("awas", f"Sisa belum diisi di {len(g['sisa_belum'])} catatan. Gaji bisa turun setelah sisa diisi.")
