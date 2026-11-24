@@ -37,6 +37,22 @@ Tampilan: krem kertas, tinta cokelat kakao, tombol cokelat roti; navigasi bawah 
 Font Karla dan Playfair Display (lisensi SIL Open Font License) disimpan di `static/fonts/`,
 jadi tampilan tidak bergantung pada internet.
 
+## Pasang di layar utama HP (pintasan)
+
+Aplikasi bisa ditambahkan ke layar utama HP sebagai ikon. HP harus tersambung ke wifi toko.
+Tidak ada mode offline dan tidak ada service worker: data selalu diambil dari server.
+
+- Nama di bawah ikon diatur lewat `KUE_NAMA_TOKO` (default "Toko Kue").
+- Ikon dibuat oleh `python3 tools/buat_ikon.py` ke `static/ikon/`. Logo sendiri: ganti PNG dengan ukuran yang sama
+  (192, 512, maskable 512, apple-touch-icon 180).
+
+**Android (Chrome):** buka `http://<alamat-server>:8000` → menu titik tiga ⋮ → *Tambahkan ke layar utama* → *Tambahkan*.
+**iPhone (Safari, bukan Chrome):** buka alamat yang sama → tombol Bagikan (kotak dengan panah ke atas) →
+*Tambahkan ke Layar Utama* → *Tambah*.
+
+Catatan: alamat `http` (tanpa HTTPS) dianggap "tidak aman" oleh browser. Di Android, pintasannya kemungkinan
+terbuka di tab Chrome biasa dengan kotak alamat, bukan layar penuh. Ini belum dites di HP sungguhan.
+
 ## Kebutuhan
 
 Hanya Python 3.9 atau lebih baru. Tidak perlu install paket lain. Linux, Windows, dan Mac bisa.
@@ -85,7 +101,8 @@ python3 -m unittest -v
 ```
 
 `test_app.py` (fase 1), `test_fase2.py` (migrasi, akses + 403, gaji, filter laporan) dan `test_tampilan.py`
-(foto/warna kue, kartu, Beranda, sisa per batch dan per hari) menyalakan server
+(foto/warna kue, kartu, Beranda, sisa per batch dan per hari) dan `test_pwa.py` (manifest, ikon, tag iPhone,
+tanpa cache, tanpa service worker) menyalakan server
 sungguhan dengan database sementara. Alur satu hari fase 1:
 produksi beberapa batch, koreksi, sisa, laporan, ganti harga, dan batas akses karyawan.
 

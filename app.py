@@ -6,6 +6,7 @@ Jalankan:  python3 app.py      lalu buka http://<ip-server>:8000 dari HP di wifi
 """
 import hashlib
 import html
+import json
 import base64
 import os
 import re
@@ -23,6 +24,8 @@ TZ = ZoneInfo(os.environ.get("KUE_TZ", "Asia/Jakarta"))
 HOST = os.environ.get("KUE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("KUE_PORT", "8000"))
 SESSION_DAYS = 30
+# Nama toko untuk judul, ikon layar utama, dan manifest. Nama asli toko belum diberikan pemilik.
+NAMA_TOKO = os.environ.get("KUE_NAMA_TOKO", "Toko Kue")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -323,6 +326,46 @@ def gaji_info(db, user, sampai=None):
 # garis tipis (tanpa bayangan), ikon garis SVG, angka penting besar, aksi utama di zona jempol.
 
 FONTS = {"karla.woff2", "playfair.woff2"}
+IKON_FILE = {"ikon-192.png", "ikon-512.png", "ikon-maskable-512.png", "apple-touch-icon-180.png"}
+WARNA_LATAR = "#F7F1E6"
+
+
+def manifest():
+    """Web app manifest untuk "Tambahkan ke layar utama". Sengaja TANPA service worker: data selalu dari server."""
+    return {
+        "name": f"{NAMA_TOKO} — Catatan Harian",
+        "short_name": NAMA_TOKO[:12],
+        "description": "Catatan produksi, sisa, laporan, dan gaji toko kue",
+        "lang": "id",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "any",
+        "theme_color": WARNA_LATAR,
+        "background_color": WARNA_LATAR,
+        "icons": [
+            {"src": "/static/ikon/ikon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/static/ikon/ikon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": "/static/ikon/ikon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        ],
+    }
+
+
+def kepala_html(judul):
+    """Tag <head> bersama untuk semua halaman: layar penuh di HP (Android & iPhone), ikon, dan warna tema."""
+    nama = e(NAMA_TOKO)
+    return f"""<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="{WARNA_LATAR}">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{nama}">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="application-name" content="{nama}">
+<link rel="apple-touch-icon" href="/static/ikon/apple-touch-icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/ikon/ikon-192.png">
+<title>{e(judul)} · {nama}</title>"""
 
 CSS = """
 @font-face{font-family:Karla;src:url(/static/fonts/karla.woff2) format('woff2');font-weight:400 800;font-display:swap}
@@ -342,11 +385,11 @@ a{color:var(--crust);text-underline-offset:3px}
 .ikon{width:24px;height:24px;flex:none;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
 
 /* kerangka */
-.atas{display:flex;align-items:center;gap:12px;padding:14px 20px 0;max-width:760px;margin:0 auto}
+.atas{display:flex;align-items:center;gap:12px;padding:max(14px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) 0 max(20px,env(safe-area-inset-left));max-width:760px;margin:0 auto}
 .merek{font:700 19px/1 var(--serif);color:var(--crust);text-decoration:none;letter-spacing:.2px}
 .atas .siapa{margin-left:auto;font-size:14px;color:var(--ink-2)}
 .atas form{margin:0}
-main{max-width:760px;margin:0 auto;padding:8px 20px calc(var(--nav-h) + 32px + env(safe-area-inset-bottom))}
+main{max-width:760px;margin:0 auto;padding:8px max(20px,env(safe-area-inset-right)) calc(var(--nav-h) + 32px + env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
 body.ada-bar main{padding-bottom:calc(var(--nav-h) + var(--bar-h) + 32px + env(safe-area-inset-bottom))}
 body.tanpa-nav main{padding-bottom:calc(32px + env(safe-area-inset-bottom))}
 body.tanpa-nav.ada-bar main{padding-bottom:calc(var(--bar-h) + 32px + env(safe-area-inset-bottom))}
@@ -458,7 +501,7 @@ details[open]>summary .biasa{color:var(--ink-2)}
 .tambah>summary{display:flex}
 
 /* masuk */
-.masuk{max-width:440px;margin:0 auto;padding:48px 24px}
+.masuk{max-width:440px;margin:0 auto;padding:max(48px,calc(env(safe-area-inset-top) + 24px)) max(24px,env(safe-area-inset-right)) calc(32px + env(safe-area-inset-bottom)) max(24px,env(safe-area-inset-left))}
 .masuk .merek{font-size:34px;display:block;margin-bottom:6px}
 
 /* filter periode laporan */
@@ -563,8 +606,8 @@ details[open]>summary .biasa{color:var(--ink-2)}
 .batang span{display:block;height:100%;background:var(--crust);border-radius:4px}
 
 @media (min-width:768px){
-  :root{--rail:104px}
-  .nav{top:0;right:auto;width:var(--rail);flex-direction:column;justify-content:flex-start;padding-top:20px;border-top:0;border-right:1px solid var(--line)}
+  :root{--rail:calc(104px + env(safe-area-inset-left))}
+  .nav{top:0;right:auto;width:var(--rail);flex-direction:column;justify-content:flex-start;padding:calc(20px + env(safe-area-inset-top)) 0 env(safe-area-inset-bottom) env(safe-area-inset-left);border-top:0;border-right:1px solid var(--line)}
   .nav a,.nav button{flex:none;min-height:80px}
   .nav a[aria-current]::before{top:16%;bottom:16%;left:0;right:auto;width:3px;height:auto;border-radius:0 3px 3px 0}
   body:not(.tanpa-nav) .atas,body:not(.tanpa-nav) main{margin-left:calc(var(--rail) + max(0px,(100vw - var(--rail) - 760px)/2))}
@@ -709,6 +752,14 @@ class App(BaseHTTPRequestHandler):
             return self.font(url.path.rsplit("/", 1)[-1])
         if url.path.startswith("/foto/"):
             return self.foto(url.path.rsplit("/", 1)[-1])
+        if url.path == "/manifest.webmanifest":
+            return self.berkas(json.dumps(manifest(), ensure_ascii=False).encode(), "application/manifest+json", 3600)
+        if url.path.startswith("/static/ikon/") or url.path in ("/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+            nama = "apple-touch-icon-180.png" if url.path.startswith("/apple-touch-icon") else url.path.rsplit("/", 1)[-1]
+            if nama not in IKON_FILE:
+                return self.berkas(b"", "text/plain", 0, 404)
+            with open(os.path.join(BASE, "static", "ikon", nama), "rb") as fh:
+                return self.berkas(fh.read(), "image/png", 86400)
         self.q = {k: v[0] for k, v in parse_qs(url.query).items()}
         self.f, self.fl, self.akses = {}, {}, set()
         if method == "POST":
@@ -768,6 +819,14 @@ class App(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def berkas(self, data, jenis, umur, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", jenis)
+        self.send_header("Cache-Control", f"public, max-age={umur}" if umur else "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def foto(self, nama):
         path = os.path.join(foto_dir(), nama)
         if not re.fullmatch(r"kue-\d+-[0-9a-f]{12}\.jpg", nama) or not os.path.isfile(path):
@@ -797,6 +856,7 @@ class App(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")  # data keuangan selalu diambil ulang dari server
         for k, v in headers:
             self.send_header(k, v)
         self.end_headers()
@@ -832,12 +892,10 @@ class App(BaseHTTPRequestHandler):
         if u:
             ada_lainnya = any(h == "/lainnya" for h, _, _ in menu)
             keluar = "" if ada_lainnya else ('<form method="post" action="/logout"><button class="biasa">Keluar</button></form>')
-            atas = f'<div class="atas"><a class="merek" href="/">Toko Kue</a><span class="siapa">{e(u["name"])}</span>{keluar}</div>'
+            atas = f'<div class="atas"><a class="merek" href="/">{e(NAMA_TOKO)}</a><span class="siapa">{e(u["name"])}</span>{keluar}</div>'
         pesan = kabar("ok", e(self.q["pesan"])) if self.q.get("pesan") else ""
         alis = f'<p class="alis">{alis}</p>' if alis else ""
-        self.send(status, f"""<!doctype html><html lang="id"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#F7F1E6"><title>{e(judul)} · Toko Kue</title>
+        self.send(status, f"""<!doctype html><html lang="id"><head>{kepala_html(judul)}
 <link rel="preload" href="/static/fonts/karla.woff2" as="font" type="font/woff2" crossorigin>
 <style>{CSS}</style></head><body class="{' '.join(kelas)}">{atas}
 <main>{alis}<h1>{h1 or e(judul)}</h1>{pesan}{isi}</main>{bar}{nav}<script>{JS}</script></body></html>""")
@@ -877,10 +935,8 @@ class App(BaseHTTPRequestHandler):
     # --- setup & login ---
 
     def halaman_masuk(self, judul, isi, status=200):
-        self.send(status, f"""<!doctype html><html lang="id"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#F7F1E6"><title>{e(judul)} · Toko Kue</title><style>{CSS}</style></head>
-<body class="tanpa-nav"><div class="masuk"><span class="merek">Toko Kue</span>
+        self.send(status, f"""<!doctype html><html lang="id"><head>{kepala_html(judul)}<style>{CSS}</style></head>
+<body class="tanpa-nav"><div class="masuk"><span class="merek">{e(NAMA_TOKO)}</span>
 <p class="kecil" style="margin:0 0 28px">Catatan harian produksi, sisa, dan penjualan</p>
 <h1 style="font-size:24px">{e(judul)}</h1>{isi}</div></body></html>""")
 
