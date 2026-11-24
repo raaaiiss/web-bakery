@@ -45,7 +45,7 @@ class Dasar(unittest.TestCase):
         return d
 
     def karyawan(self, username, *akses, pct=None):
-        data = {"name": username.title(), "username": username, "password": "rahasia1"}
+        data = {"name": username.title(), "username": username, "password": "rahasia1", "digaji": "1"}  # sakelar Menerima gaji = Ya
         if pct is not None:
             data["pct"] = str(pct)
         klien_admin = self.admin

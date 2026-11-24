@@ -15,6 +15,9 @@ Fase 2:
 - Gaji berjalan = persen karyawan (default 25%) × harga jual kue yang terjual sejak pembayaran terakhir.
   "Tandai sudah dibayar" menyimpan riwayat dan hitungan mulai lagi dari nol besoknya. Gaji tidak dikurangkan dari untung.
 - Laporan: hari ini, 7 hari, bulan ini, rentang tanggal.
+- Menerima gaji (Ya/Tidak) per karyawan, terpisah dari centang "Lihat gaji sendiri". Yang Tidak: tidak dihitung,
+  tidak muncul di halaman Gaji/Beranda, tidak bisa ditandai dibayar. Ya -> Tidak dengan gaji belum dibayar minta
+  konfirmasi. Akun baru default Tidak. Migrasi: karyawan dengan persen > 0 = Ya, 0% = Tidak, admin = Tidak.
 
 Tampilan baru:
 - Beranda: header berwarna (penjualan hari ini, jumlah batch, terjual, sisa), menu berkelompok dalam kartu
