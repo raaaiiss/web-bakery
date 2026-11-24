@@ -18,6 +18,10 @@ Fase 2:
 - Menerima gaji (Ya/Tidak) per karyawan, terpisah dari centang "Lihat gaji sendiri". Yang Tidak: tidak dihitung,
   tidak muncul di halaman Gaji/Beranda, tidak bisa ditandai dibayar. Ya -> Tidak dengan gaji belum dibayar minta
   konfirmasi. Akun baru default Tidak. Migrasi: karyawan dengan persen > 0 = Ya, 0% = Tidak, admin = Tidak.
+- Gaji berjalan diberi label **sementara** (ada sisa belum diisi, dianggap terjual) atau **pasti**, plus baris
+  "Gaji hari ini". Halaman Gaji dan Beranda dimuat ulang otomatis tiap 1 menit. Admin bisa mengatur "Gaji dihitung mulai".
+- Hapus user = nonaktifkan: tidak bisa masuk, sesi dihentikan, hilang dari daftar aktif dan Gaji; nama tetap di catatan
+  lama; username tidak bisa dipakai lagi. Tidak bisa hapus diri sendiri atau admin terakhir.
 
 Tampilan baru:
 - Beranda: header berwarna (penjualan hari ini, jumlah batch, terjual, sisa), menu berkelompok dalam kartu
