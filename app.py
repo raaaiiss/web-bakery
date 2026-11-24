@@ -386,11 +386,12 @@ details[open]>summary .biasa{color:var(--ink-2)}
 .masuk .merek{font-size:34px;display:block;margin-bottom:6px}
 
 /* filter periode laporan */
-.pilih{display:flex;gap:6px;margin:4px 0 12px;overflow-x:auto}
-.pilih a{flex:none;min-height:44px;display:flex;align-items:center;padding:0 14px;border-radius:999px;border:1.5px solid var(--line-strong);
+.pilih{display:flex;gap:6px;margin:4px 0 12px}
+.pilih a{flex:1;justify-content:center;white-space:nowrap;min-height:44px;display:flex;align-items:center;padding:0 6px;border-radius:999px;border:1.5px solid var(--line-strong);
   color:var(--ink);text-decoration:none;font-weight:700;font-size:15px;background:var(--surface)}
 .pilih a[aria-current]{background:var(--ink);border-color:var(--ink);color:#fff}
 .rentang{display:grid;grid-template-columns:1fr 1fr;gap:0 10px;align-items:end;margin-bottom:8px}
+.rentang>div{min-width:0}.rentang input{min-width:0;padding:0 10px}
 .rentang label{margin:4px 0 6px;font-size:14px}
 .rentang .tombol{grid-column:1/-1;margin-top:10px}
 
@@ -998,12 +999,12 @@ class App(BaseHTTPRequestHandler):
             isi += f"""<div class="duo">
               <div><div class="label">Untung*</div><div class="nilai untung">{rupiah(t['untung'])}</div></div>
               <div><div class="label">Rugi dari sisa</div><div class="nilai rugi">{rupiah(t['kerugian'])}</div></div></div>"""
-        laku = f'{e(lp["laku"]["nama"])} <span class="kecil">· {lp["laku"]["terjual"]} terjual</span>' if lp["laku"] else "-"
+        laku = f'{e(lp["laku"]["nama"])} <span class="kecil" style="display:block">{lp["laku"]["terjual"]} terjual</span>' if lp["laku"] else "-"
         ss = lp["sering_sisa"]
         if ss and dari == sampai:
-            sering = f'{e(ss["nama"])} <span class="kecil">· sisa {ss["sisa"]}</span>'
+            sering = f'{e(ss["nama"])} <span class="kecil" style="display:block">sisa {ss["sisa"]}</span>'
         elif ss:
-            sering = f'{e(ss["nama"])} <span class="kecil">· {ss["hari_sisa"]} hari, total {ss["sisa"]}</span>'
+            sering = f'{e(ss["nama"])} <span class="kecil" style="display:block">{ss["hari_sisa"]} hari ada sisa, total {ss["sisa"]}</span>'
         else:
             sering = "-"
         isi += f"""<div class="duo">
@@ -1044,7 +1045,10 @@ class App(BaseHTTPRequestHandler):
         if not orang:
             return self.page("Gaji", kabar("awas", "Belum ada karyawan. Tambah di menu Pengguna dan akses."))
         isi = ""
+        tanpa_persen = [u for u in orang if u["pct"] == 0 and self.admin()]
         for u in orang:
+            if u in tanpa_persen:
+                continue
             g = gaji_info(self.db, u)
             periode = "Sudah dibayar sampai hari ini." if g["sudah_lunas"] else \
                 f"{tgl_indo(g['mulai'])} – {tgl_indo(g['sampai'])}"
@@ -1066,9 +1070,13 @@ class App(BaseHTTPRequestHandler):
                 isi += '<h2>Riwayat pembayaran</h2><ul class="daftar">' + "".join(
                     f"""<li><div class="baris"><span class="nama" style="font-size:16px">{tgl_indo(r['period_start'])[-11:]} – {tgl_indo(r['period_end'])[-11:]}</span>
                       <span class="kanan" style="font-weight:800">{rupiah(r['amount'])}</span></div>
-                      <div class="info"><span>dibayar {r['paid_at'][:10]}</span><span>{r['pct']}% × {rupiah(r['omzet'])}</span></div></li>"""
+                      <div class="info"><span>dibayar {tgl_indo(r['paid_at'][:10])[-11:]}</span><span>{r['pct']}% × {rupiah(r['omzet'])}</span></div></li>"""
                     for r in riwayat) + "</ul>"
             isi += "</section>"
+        if tanpa_persen:
+            isi += '<h2>Tanpa gaji persen (0%)</h2><ul class="daftar">' + "".join(
+                f'<li class="baris"><span class="nama">{e(u["name"])}</span><a class="kanan" href="/pengguna">Atur persen</a></li>'
+                for u in tanpa_persen) + "</ul>"
         isi += '<p class="bantu">Gaji = persen × harga jual kue yang terjual (harga saat dicatat). Belum dikurangkan dari untung.</p>'
         self.page("Gaji", isi, alis="Gaji berjalan")
 

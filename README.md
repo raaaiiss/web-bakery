@@ -1,15 +1,27 @@
-# Pencatatan Toko Kue (versi 1, prototype)
+# Pencatatan Toko Kue (prototype, fase 2)
 
-Pengganti buku catatan: produksi harian, sisa saat tutup, dan laporan harian (omzet, untung, kerugian dari sisa).
+Pengganti buku catatan: produksi harian, sisa saat tutup, laporan, dan gaji pembuat kue.
 
-Isi versi 1:
+Fase 1:
 - Login. Akun admin pertama dibuat lewat halaman pertama saat database masih kosong.
-- Admin: tambah/ubah kue dan harga, input sisa, laporan harian, tambah karyawan, buatkan password baru, riwayat perubahan.
-- Karyawan: input produksi per batch (dijumlahkan), koreksi batch sendiri di hari yang sama.
-- Harga disalin ke tiap batch, jadi ganti harga tidak mengubah catatan lama.
+- Input produksi per batch (dijumlahkan), koreksi batch sendiri di hari yang sama; setelah itu hanya admin.
+- Input sisa saat tutup. Harga disalin ke tiap batch, jadi ganti harga tidak mengubah catatan lama.
 - Semua perubahan tercatat di menu Riwayat.
 
-Belum ada (fase 2 dan 3): gaji, hak akses per orang, laporan 7 hari/bulanan, unduh Excel, backup otomatis.
+Fase 2:
+- Hak akses dicentang per karyawan: input produksi, input sisa, lihat omzet, lihat untung, lihat gaji sendiri,
+  lihat harga modal, kelola kue & harga. Kelola user khusus admin. Karyawan baru mulai tanpa akses.
+  Server menolak (403) aksi yang tidak dicentang.
+- Gaji berjalan = persen karyawan (default 25%) × harga jual kue yang terjual sejak pembayaran terakhir.
+  "Tandai sudah dibayar" menyimpan riwayat dan hitungan mulai lagi dari nol besoknya. Gaji tidak dikurangkan dari untung.
+- Laporan: hari ini, 7 hari, bulan ini, rentang tanggal.
+
+Belum ada (fase 3): unduh Excel, backup otomatis, push ke GitHub.
+
+### Pembaruan database
+Saat `app.py` versi fase 2 pertama kali jalan, database lama otomatis dinaikkan ke versi 2: hanya menambah
+tabel `user_perms`, `wage_payments` dan kolom `users.pct`, `users.gaji_mulai`. Tidak ada data yang dihapus.
+Karyawan lama tetap punya akses input produksi. Tetap salin `data/toko.db` dulu sebelum memasang versi baru.
 
 Tampilan: krem kertas, tinta cokelat kakao, tombol cokelat roti; navigasi bawah di HP, rel kiri di tablet.
 Font Karla dan Playfair Display (lisensi SIL Open Font License) disimpan di `static/fonts/`,
@@ -62,7 +74,8 @@ Kalau firewall aktif (`ufw`): `sudo ufw allow from <jaringan-wifi-toko> to any p
 python3 -m unittest -v
 ```
 
-Test menyalakan server sungguhan dengan database sementara, lalu menjalankan alur satu hari:
+`test_app.py` (fase 1) dan `test_fase2.py` (migrasi, akses + 403, gaji, filter laporan) menyalakan server
+sungguhan dengan database sementara. Alur satu hari fase 1:
 produksi beberapa batch, koreksi, sisa, laporan, ganti harga, dan batas akses karyawan.
 
 ## Rumus (versi 1)
