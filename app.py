@@ -431,7 +431,7 @@ body.tanpa-nav .bar{bottom:0;padding-bottom:calc(12px + env(safe-area-inset-bott
 /* tombol */
 .tombol{display:inline-flex;align-items:center;justify-content:center;gap:10px;min-height:56px;padding:0 22px;
   border-radius:var(--r);border:2px solid var(--crust);background:var(--crust);color:var(--on-crust);
-  font:700 18px/1 var(--sans);text-decoration:none;cursor:pointer;transition:background-color .12s}
+  font:700 18px/1.2 var(--sans);text-align:center;text-decoration:none;cursor:pointer;transition:background-color .12s}
 .tombol:active{background:var(--crust-press);border-color:var(--crust-press)}
 .tombol.garis{background:transparent;color:var(--crust)}
 .tombol.garis:active{background:var(--tint)}
@@ -1744,7 +1744,7 @@ class App(BaseHTTPRequestHandler):
         isi = kabar("awas", f"<b>{e(u['name'])}</b> masih punya gaji belum dibayar <b>{rupiah(g['jumlah'])}</b> "
                             f"({tgl_indo(g['mulai'])} – {tgl_indo(g['sampai'])}). Kalau dinonaktifkan, angka ini tidak dihitung lagi.")
         isi += f"""<p>Bayar dulu atau tetap dinonaktifkan?</p>
-          <a class="tombol penuh" href="/gaji">Ke halaman Gaji untuk membayar</a>
+          <a class="tombol penuh" href="/gaji">Bayar dulu di halaman Gaji</a>
           <form method="post" action="/pengguna/{u['id']}/akses" style="margin-top:12px">{tersembunyi}
             <input type="hidden" name="pct" value="{pct}"><input type="hidden" name="digaji" value="0">
             <input type="hidden" name="konfirmasi_nonaktif" value="1">
