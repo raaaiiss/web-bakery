@@ -130,6 +130,7 @@ def init_db():
     migrasi_tampilan(db)
     migrasi_gaji(db)
     migrasi_hapus(db)
+    migrasi_pengambilan(db)
     db.close()
 
 
@@ -234,6 +235,21 @@ def migrasi_hapus(db):
             db.execute("ALTER TABLE users ADD COLUMN aktif INTEGER NOT NULL DEFAULT 1")
         if "dihapus_pada" not in kolom:
             db.execute("ALTER TABLE users ADD COLUMN dihapus_pada TEXT")
+
+
+def migrasi_pengambilan(db):
+    """Tabel pengambilan gaji sebagian + kolom wage_payments.diambil_sebelumnya. Hanya menambah; data lama tetap."""
+    with db:
+        db.execute("""CREATE TABLE IF NOT EXISTS wage_withdrawals(
+          id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
+          tanggal TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount > 0), catatan TEXT NOT NULL DEFAULT '',
+          saldo_setelah INTEGER NOT NULL, created_at TEXT NOT NULL, created_by INTEGER NOT NULL REFERENCES users(id),
+          payment_id INTEGER REFERENCES wage_payments(id),
+          dibatalkan INTEGER NOT NULL DEFAULT 0, dibatalkan_pada TEXT, dibatalkan_oleh INTEGER REFERENCES users(id),
+          alasan_batal TEXT)""")
+        kolom = {r[1] for r in db.execute("PRAGMA table_info(wage_payments)")}
+        if "diambil_sebelumnya" not in kolom:
+            db.execute("ALTER TABLE wage_payments ADD COLUMN diambil_sebelumnya INTEGER NOT NULL DEFAULT 0")
 
 
 def migrasi_tampilan(db):
@@ -344,6 +360,16 @@ def gaji_info(db, user, sampai=None):
     return {"mulai": mulai, "sampai": sampai, "omzet": omzet, "pct": user["pct"],
             "jumlah": omzet * user["pct"] // 100, "sisa_belum": lp["sisa_belum"] if lp else [],
             "sudah_lunas": mulai > sampai}
+
+
+def saldo_info(db, user):
+    """Saldo gaji = gaji terkumpul periode ini (rumus lama, tidak berubah) dikurangi pengambilan sebagian yang belum
+    ditutup 'Bayar semua' dan tidak dibatalkan. Saldo negatif = diambil lebih; terkejar oleh penjualan berikutnya."""
+    g = gaji_info(db, user)
+    diambil = db.execute("""SELECT COALESCE(SUM(amount), 0) FROM wage_withdrawals
+                            WHERE user_id = ? AND payment_id IS NULL AND dibatalkan = 0""", (user["id"],)).fetchone()[0]
+    return {**g, "terkumpul": g["jumlah"], "diambil": diambil, "saldo": g["jumlah"] - diambil,
+            "sementara": bool(g["sisa_belum"])}
 
 
 def gaji_hari_ini(db, user):
@@ -572,6 +598,16 @@ details[open]>summary .biasa{color:var(--ink-2)}
 .tombol.bahaya{background:var(--danger);border-color:var(--danger)}
 .tombol.bahaya:active{background:#8E1D17;border-color:#8E1D17}
 
+/* saldo & pengambilan gaji */
+.rincian{list-style:none;margin:8px 0 6px;padding:0;border-top:1px solid var(--line)}
+.rincian li{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--line);font-size:16px}
+.rincian b{font-weight:800;white-space:nowrap}
+.rincian li.total{font-weight:700}
+.angka.rugi{color:var(--terra)}
+.ambil{margin-top:10px}
+.ambil>summary{display:block}
+li.batal .nama,li.batal .kanan{text-decoration:line-through;color:var(--ink-2)}
+
 /* filter periode laporan */
 .pilih{display:flex;gap:6px;margin:4px 0 12px}
 .pilih a{flex:1;justify-content:center;white-space:nowrap;min-height:44px;display:flex;align-items:center;padding:0 6px;border-radius:999px;border:1.5px solid var(--line-strong);
@@ -797,6 +833,8 @@ ROUTES = {
     ("GET", "/sisa-harian"): ("sisa_harian", ("sisa", "omzet", "untung")),
     ("GET", "/gaji"): ("gaji", ("gaji",)),
     ("POST", "/gaji/:id/bayar"): ("gaji_bayar", "admin"),
+    ("POST", "/gaji/:id/ambil"): ("gaji_ambil", "admin"),
+    ("POST", "/gaji-ambil/:id/batal"): ("gaji_ambil_batal", "admin"),
     ("GET", "/kue"): ("kue", ("kue",)),
     ("POST", "/kue"): ("kue_tambah", ("kue",)),
     ("POST", "/kue/:id/ubah"): ("kue_ubah", ("kue",)),
@@ -1121,10 +1159,10 @@ class App(BaseHTTPRequestHandler):
                     f'<a href="{h}"><span class="lingkar">{ikon(i)}</span>{t_}</a>' for h, i, t_ in tombol) + "</div></section>"
 
         if self.lihat_gaji() and not self.admin():
-            g = gaji_info(self.db, self.user)
+            g = saldo_info(self.db, self.user)
             h = gaji_hari_ini(self.db, self.user)
-            isi += f"""<div class="duo"><div><div class="label">Gaji berjalan {lencana(bool(g['sisa_belum']) or bool(h and h['sementara'] and h['ada_produksi']))}</div>
-              <div class="nilai">{rupiah(g['jumlah'])}</div></div>
+            isi += f"""<div class="duo"><div><div class="label">Saldo gaji {lencana(bool(g['sisa_belum']) or bool(h and h['sementara'] and h['ada_produksi']))}</div>
+              <div class="nilai">{rupiah(g['saldo'])}</div></div>
               <div><div class="label">Sejak</div><div class="nilai" style="font-size:20px">{tgl_indo(g['mulai']) if not g['sudah_lunas'] else 'baru dibayar'}</div></div></div>"""
             if h:
                 isi += f"""<div class="baris hari-ini"><span>Gaji hari ini {lencana(h['sementara'])}</span>
@@ -1518,37 +1556,7 @@ class App(BaseHTTPRequestHandler):
         for u in orang:
             if u in tanpa_persen:
                 continue
-            g = gaji_info(self.db, u)
-            periode = "Sudah dibayar sampai hari ini." if g["sudah_lunas"] else \
-                f"{tgl_indo(g['mulai'])} – {tgl_indo(g['sampai'])}"
-            h = gaji_hari_ini(self.db, u)
-            sementara = bool(g["sisa_belum"]) or bool(h and h["sementara"] and h["ada_produksi"])
-            isi += f"""<section class="gaji-blok"><div class="baris"><span class="nama">{e(u['name'])}</span>
-                <span class="kanan kecil">{g['pct']}% dari omzet</span></div>
-              <div class="besar"><div class="angka">{rp_besar(g['jumlah'])}</div>{lencana(sementara) if not g['sudah_lunas'] else ''}</div>
-              <div class="info"><span>{periode}</span><span>omzet {rupiah(g['omzet'])}</span></div>"""
-            if h:
-                ket = ("belum ada kue dibuat hari ini" if not h["ada_produksi"] else
-                       f"sisa {h['sisa_belum']} kue belum diisi, dianggap terjual" if h["sementara"] else "sisa hari ini sudah diisi")
-                isi += f"""<div class="baris hari-ini"><span>Gaji hari ini {lencana(h['sementara'])}</span>
-                  <b class="kanan">{rupiah(h['jumlah'])}</b></div><p class="bantu" style="margin-top:0">{ket}</p>"""
-            if g["sisa_belum"]:
-                isi += kabar("awas", f"Sisa belum diisi di {len(g['sisa_belum'])} catatan. Gaji bisa turun setelah sisa diisi.")
-            if self.admin() and not g["sudah_lunas"]:
-                isi += f"""<form method="post" action="/gaji/{u['id']}/bayar"
-                  onsubmit="return confirm('Tandai gaji {e(u['name'])} {rupiah(g['jumlah'])} sudah dibayar? Hitungan mulai lagi dari nol besok.')">
-                  <input type="hidden" name="jumlah" value="{g['jumlah']}">
-                  <button class="tombol penuh" style="margin-top:12px">Tandai sudah dibayar</button></form>
-                  <p class="bantu">Tekan setelah sisa hari ini diisi. Penjualan sampai hari ini masuk pembayaran ini.</p>"""
-            riwayat = self.db.execute("""SELECT * FROM wage_payments WHERE user_id = ? ORDER BY id DESC LIMIT 24""",
-                                      (u["id"],)).fetchall()
-            if riwayat:
-                isi += '<h2>Riwayat pembayaran</h2><ul class="daftar">' + "".join(
-                    f"""<li><div class="baris"><span class="nama" style="font-size:16px">{tgl_indo(r['period_start'])[-11:]} – {tgl_indo(r['period_end'])[-11:]}</span>
-                      <span class="kanan" style="font-weight:800">{rupiah(r['amount'])}</span></div>
-                      <div class="info"><span>dibayar {tgl_indo(r['paid_at'][:10])[-11:]}</span><span>{r['pct']}% × {rupiah(r['omzet'])}</span></div></li>"""
-                    for r in riwayat) + "</ul>"
-            isi += "</section>"
+            isi += self.blok_gaji(u)
         if tanpa_persen:
             isi += '<h2>Tanpa gaji persen (0%)</h2><ul class="daftar">' + "".join(
                 f'<li class="baris"><span class="nama">{e(u["name"])}</span><a class="kanan" href="/pengguna">Atur persen</a></li>'
@@ -1567,27 +1575,165 @@ class App(BaseHTTPRequestHandler):
             isi += "</ul>"
         isi += """<p class="bantu">Gaji = persen × harga jual kue yang terjual (harga saat dicatat). Belum dikurangkan dari untung.
           <b>Sementara</b>: kue yang sisanya belum diisi dianggap terjual semua, jadi angkanya bisa turun setelah sisa diisi saat tutup.
-          <b>Pasti</b>: semua sisa sudah diisi.</p>"""
+          <b>Pasti</b>: semua sisa sudah diisi. <b>Saldo</b> = gaji terkumpul dikurangi yang sudah diambil.</p>"""
         self.page("Gaji", isi, alis="Gaji berjalan", segarkan=True)
 
-    def gaji_bayar(self):
+    def blok_gaji(self, u):
+        g = saldo_info(self.db, u)
+        periode = "Sudah dibayar sampai hari ini." if g["sudah_lunas"] else f"{tgl_indo(g['mulai'])} – {tgl_indo(g['sampai'])}"
+        h = gaji_hari_ini(self.db, u)
+        sementara = g["sementara"] or bool(h and h["sementara"] and h["ada_produksi"])
+        isi = f"""<section class="gaji-blok"><div class="baris"><span class="nama">{e(u['name'])}</span>
+            <span class="kanan kecil">{g['pct']}% dari omzet</span></div>
+          <div class="kecil" style="margin-top:6px">Saldo gaji</div>
+          <div class="besar"><div class="angka{' rugi' if g['saldo'] < 0 else ''}">{rp_besar(g['saldo'])}</div>{lencana(sementara) if not g['sudah_lunas'] or g['diambil'] else ''}</div>
+          <ul class="rincian"><li><span>Gaji terkumpul periode ini</span><b>{rupiah(g['terkumpul'])}</b></li>
+            <li><span>Sudah diambil</span><b>{rupiah(g['diambil'])}</b></li>
+            <li class="total"><span>Saldo</span><b>{rupiah(g['saldo'])}</b></li></ul>
+          <div class="info"><span>{periode}</span><span>omzet {rupiah(g['omzet'])}</span></div>"""
+        if g["saldo"] < 0:
+            isi += kabar("awas", f"<b>Diambil lebih {rupiah(-g['saldo'])}.</b> Setelah sisa diisi, gaji terkumpul ternyata lebih kecil "
+                                 "dari yang sudah diambil. Kelebihannya otomatis dikurangkan dari gaji berikutnya; catatan pengambilan tetap ada.")
+        if h:
+            ket = ("belum ada kue dibuat hari ini" if not h["ada_produksi"] else
+                   f"sisa {h['sisa_belum']} kue belum diisi, dianggap terjual" if h["sementara"] else "sisa hari ini sudah diisi")
+            isi += f"""<div class="baris hari-ini"><span>Gaji hari ini {lencana(h['sementara'])}</span>
+              <b class="kanan">{rupiah(h['jumlah'])}</b></div><p class="bantu" style="margin-top:0">{ket}</p>"""
+        if g["sisa_belum"]:
+            isi += kabar("awas", f"Sisa belum diisi di {len(g['sisa_belum'])} catatan. Gaji bisa turun setelah sisa diisi.")
+        if self.admin() and g["saldo"] > 0:
+            peringatan = ""
+            if g["sementara"]:
+                peringatan = f"""<div class="kabar awas" role="status">{ikon("awas")}<div>Sebagian saldo masih <b>sementara</b>
+                  (ada sisa belum diisi). Kalau nanti saldo ternyata lebih kecil, kelebihan pengambilan dikurangkan dari gaji berikutnya.</div></div>
+                  <label class="centang" style="border:0"><input type="checkbox" name="paham_sementara" value="1" required>
+                  <span>Saya paham saldo masih sementara</span></label>"""
+            isi += f"""<form method="post" action="/gaji/{u['id']}/bayar"
+                onsubmit="return confirm('Bayar semua saldo {e(u['name'])} {rupiah(g['saldo'])}? Periode ini ditutup dan hitungan mulai dari nol besok.')">
+                <input type="hidden" name="jumlah" value="{g['saldo']}">
+                <button class="tombol penuh" style="margin-top:12px">Bayar semua · {rupiah(g['saldo'])}</button></form>
+              <details class="ambil"><summary><span class="tombol garis penuh">Ambil sebagian</span></summary>
+                <div class="panel"><form method="post" action="/gaji/{u['id']}/ambil">
+                <input type="hidden" name="saldo_tampil" value="{g['saldo']}">
+                <label for="aj{u['id']}">Jumlah diambil (Rp)</label>
+                <input id="aj{u['id']}" name="jumlah" inputmode="numeric" required placeholder="contoh 100000">
+                <p class="bantu">Maksimal saldo {rupiah(g['saldo'])}. Saldo sisanya tetap bertambah dengan penjualan berikutnya.</p>
+                <label for="at{u['id']}">Tanggal diambil</label>
+                <input id="at{u['id']}" type="date" name="tanggal" value="{today()}" max="{today()}" style="max-width:220px">
+                <label for="ac{u['id']}">Catatan (boleh kosong)</label>
+                <input id="ac{u['id']}" name="catatan" maxlength="120" placeholder="contoh: untuk belanja">
+                {peringatan}
+                <button class="tombol penuh" style="margin-top:16px">Catat pengambilan</button></form></div></details>
+              <p class="bantu">Bayar semua: seluruh saldo dibayar, periode ditutup, hitungan mulai dari nol besok.
+                Ambil sebagian: saldo berkurang, periode tetap jalan.</p>"""
+        isi += self.riwayat_pengambilan(u)
+        riwayat = self.db.execute("SELECT * FROM wage_payments WHERE user_id = ? ORDER BY id DESC LIMIT 24", (u["id"],)).fetchall()
+        if riwayat:
+            isi += '<h2>Riwayat pembayaran</h2><ul class="daftar">' + "".join(
+                f"""<li><div class="baris"><span class="nama" style="font-size:16px">{tgl_indo(r['period_start'])[-11:]} – {tgl_indo(r['period_end'])[-11:]}</span>
+                  <span class="kanan" style="font-weight:800">{rupiah(r['amount'])}</span></div>
+                  <div class="info"><span>ditutup {tgl_indo(r['paid_at'][:10])[-11:]}</span><span>{r['pct']}% × {rupiah(r['omzet'])}</span>
+                  {f"<span>diambil sebagian {rupiah(r['diambil_sebelumnya'])}, dibayar saat ditutup {rupiah(r['amount'] - r['diambil_sebelumnya'])}</span>" if r['diambil_sebelumnya'] else ''}</div></li>"""
+                for r in riwayat) + "</ul>"
+        return isi + "</section>"
+
+    def riwayat_pengambilan(self, u):
+        rows = self.db.execute("""SELECT w.*, a.name pencatat, b.name pembatal FROM wage_withdrawals w
+            JOIN users a ON a.id = w.created_by LEFT JOIN users b ON b.id = w.dibatalkan_oleh
+            WHERE w.user_id = ? ORDER BY w.id DESC LIMIT 30""", (u["id"],)).fetchall()
+        if not rows:
+            return ""
+        isi = '<h2>Riwayat pengambilan</h2><ul class="daftar">'
+        for r in rows:
+            status = ("" if not r["dibatalkan"] else
+                      f'<span class="rugi-teks">dibatalkan {tgl_indo(r["dibatalkan_pada"][:10])[-11:]} oleh {e(r["pembatal"])}: {e(r["alasan_batal"])}</span>')
+            ditutup = '<span>termasuk pembayaran yang sudah ditutup</span>' if r["payment_id"] else ""
+            batal = ""
+            if self.admin() and not r["dibatalkan"] and not r["payment_id"]:
+                batal = f"""<details><summary><span class="biasa">Batalkan (salah catat)</span></summary><div class="panel">
+                  <form method="post" action="/gaji-ambil/{r['id']}/batal">
+                  <label for="ab{r['id']}">Alasan pembatalan</label>
+                  <input id="ab{r['id']}" name="alasan" required maxlength="120" placeholder="contoh: salah ketik jumlah">
+                  <button class="tombol bahaya penuh" style="margin-top:12px">Batalkan pengambilan {rupiah(r['amount'])}</button></form>
+                  <p class="bantu">Baris ini tidak dihapus, hanya ditandai dibatalkan. Saldo kembali bertambah {rupiah(r['amount'])}.</p></div></details>"""
+            isi += f"""<li class="{'batal' if r['dibatalkan'] else ''}"><div class="baris"><span class="nama" style="font-size:16px">{tgl_indo(r['tanggal'])[-11:]}</span>
+              <span class="kanan" style="font-weight:800">{rupiah(r['amount'])}</span></div>
+              <div class="info"><span>dicatat {e(r['pencatat'])}</span><span>saldo setelahnya {rupiah(r['saldo_setelah'])}</span>
+              {f"<span>{e(r['catatan'])}</span>" if r['catatan'] else ''}{ditutup}{status}</div>{batal}</li>"""
+        return isi + "</ul>"
+
+    def karyawan_digaji(self):
         u = self.db.execute("SELECT * FROM users WHERE id = ? AND role = 'karyawan'", (self.id,)).fetchone()
         if not u:
             raise Gagal("Karyawan tidak ditemukan.", 404)
+        if not u["aktif"]:
+            raise Gagal(f"{u['name']} sudah dihapus, jadi gajinya tidak bisa dicatat lagi.")
         if not u["digaji"]:
             raise Gagal(f"{u['name']} tidak terdaftar menerima gaji.")
-        g = gaji_info(self.db, u)
-        if g["sudah_lunas"]:
+        return u
+
+    def gaji_bayar(self):
+        """Bayar semua = bayar seluruh saldo dan tutup periode (perilaku lama 'Tandai sudah dibayar')."""
+        u = self.karyawan_digaji()
+        g = saldo_info(self.db, u)
+        if g["sudah_lunas"] and not g["diambil"]:
             raise Gagal("Gaji sudah ditandai dibayar sampai hari ini.")
-        if angka(self.f.get("jumlah"), "Jumlah") != g["jumlah"]:
+        if angka(self.f.get("jumlah"), "Jumlah") != g["saldo"]:
             raise Gagal("Angka gaji berubah sejak halaman dibuka. Muat ulang halaman Gaji lalu coba lagi.", 409)
+        if g["saldo"] <= 0:
+            raise Gagal("Tidak ada saldo untuk dibayar." + (f" Masih diambil lebih {rupiah(-g['saldo'])}." if g["saldo"] < 0 else ""))
         with self.db:
-            self.db.execute("""INSERT INTO wage_payments(user_id, period_start, period_end, omzet, pct, amount, paid_at, paid_by)
-                VALUES(?,?,?,?,?,?,?,?)""", (u["id"], g["mulai"], g["sampai"], g["omzet"], g["pct"], g["jumlah"], stamp(),
-                                             self.user["id"]))
+            cur = self.db.execute("""INSERT INTO wage_payments(user_id, period_start, period_end, omzet, pct, amount, paid_at, paid_by,
+                diambil_sebelumnya) VALUES(?,?,?,?,?,?,?,?,?)""", (u["id"], g["mulai"], g["sampai"], g["omzet"], g["pct"],
+                                                             g["terkumpul"], stamp(), self.user["id"], g["diambil"]))
+            self.db.execute("UPDATE wage_withdrawals SET payment_id = ? WHERE user_id = ? AND payment_id IS NULL",
+                            (cur.lastrowid, u["id"]))
             catat(self.db, self.user["id"], "gaji dibayar",
-                  f"{u['username']} {g['mulai']}..{g['sampai']}: {g['pct']}% x {g['omzet']} = {g['jumlah']}")
-        self.redirect("/gaji", f"Gaji {u['name']} {rupiah(g['jumlah'])} ditandai sudah dibayar.")
+                  f"{u['username']} {g['mulai']}..{g['sampai']}: {g['pct']}% x {g['omzet']} = {g['terkumpul']}; "
+                  f"sudah diambil {g['diambil']}; dibayar sekarang {g['saldo']}")
+        self.redirect("/gaji", f"Gaji {u['name']} {rupiah(g['saldo'])} ditandai sudah dibayar. Periode ditutup.")
+
+    def gaji_ambil(self):
+        """Ambil sebagian: mengurangi saldo tanpa menutup periode."""
+        u = self.karyawan_digaji()
+        g = saldo_info(self.db, u)
+        jumlah = angka(self.f.get("jumlah"), "Jumlah diambil", 1)
+        if angka(self.f.get("saldo_tampil"), "Saldo") != g["saldo"]:
+            raise Gagal("Saldo berubah sejak halaman dibuka (mungkin ada penjualan atau sisa baru). "
+                        "Muat ulang halaman Gaji lalu coba lagi.", 409)
+        if jumlah > g["saldo"]:
+            raise Gagal(f"Jumlah {rupiah(jumlah)} lebih besar dari saldo {rupiah(g['saldo'])}.")
+        if g["sementara"] and self.f.get("paham_sementara") != "1":
+            raise Gagal("Saldo masih sementara (ada sisa belum diisi). Centang 'Saya paham saldo masih sementara' dulu.")
+        tgl = tanggal(self.f.get("tanggal") or today())
+        if tgl > today():
+            raise Gagal("Tanggal pengambilan tidak boleh setelah hari ini.")
+        catatan = (self.f.get("catatan") or "").strip()[:120]
+        with self.db:
+            self.db.execute("""INSERT INTO wage_withdrawals(user_id, tanggal, amount, catatan, saldo_setelah, created_at, created_by)
+                VALUES(?,?,?,?,?,?,?)""", (u["id"], tgl, jumlah, catatan, g["saldo"] - jumlah, stamp(), self.user["id"]))
+            catat(self.db, self.user["id"], "ambil gaji sebagian",
+                  f"{u['username']}: {jumlah} pada {tgl}; saldo {g['saldo']} -> {g['saldo'] - jumlah}" + (f"; {catatan}" if catatan else ""))
+        self.redirect("/gaji", f"Pengambilan {u['name']} {rupiah(jumlah)} dicatat. Saldo sekarang {rupiah(g['saldo'] - jumlah)}.")
+
+    def gaji_ambil_batal(self):
+        w = self.db.execute("""SELECT w.*, u.username, u.name FROM wage_withdrawals w JOIN users u ON u.id = w.user_id
+                               WHERE w.id = ?""", (self.id,)).fetchone()
+        if not w:
+            raise Gagal("Pengambilan tidak ditemukan.", 404)
+        if w["dibatalkan"]:
+            raise Gagal("Pengambilan ini sudah dibatalkan.")
+        if w["payment_id"]:
+            raise Gagal("Pengambilan ini sudah termasuk pembayaran yang ditutup, jadi tidak bisa dibatalkan.")
+        alasan = (self.f.get("alasan") or "").strip()[:120]
+        if not alasan:
+            raise Gagal("Isi alasan pembatalan.")
+        with self.db:
+            self.db.execute("UPDATE wage_withdrawals SET dibatalkan = 1, dibatalkan_pada = ?, dibatalkan_oleh = ?, alasan_batal = ? WHERE id = ?",
+                            (stamp(), self.user["id"], alasan, w["id"]))
+            catat(self.db, self.user["id"], "batalkan pengambilan gaji",
+                  f"{w['username']}: {w['amount']} pada {w['tanggal']} dibatalkan; alasan: {alasan}")
+        self.redirect("/gaji", f"Pengambilan {w['name']} {rupiah(w['amount'])} dibatalkan.")
 
     # --- kue ---
 
@@ -1817,8 +1963,8 @@ class App(BaseHTTPRequestHandler):
                                          (u["id"],)).fetchone()[0]
             if sisa_admin == 0:
                 raise Gagal("Admin terakhir tidak bisa dihapus.")
-        g = gaji_info(self.db, u) if u["digaji"] else None
-        return u, (g if g and g["jumlah"] > 0 else None)
+        g = saldo_info(self.db, u) if u["digaji"] else None
+        return u, ({**g, "jumlah": g["saldo"]} if g and g["saldo"] > 0 else None)
 
     def hapus_form(self, status=200):
         u, g = self.cek_boleh_hapus()
@@ -1906,7 +2052,8 @@ class App(BaseHTTPRequestHandler):
         lama = {r[0] for r in self.db.execute("SELECT perm FROM user_perms WHERE user_id = ?", (u["id"],))}
         catatan_gaji = ""
         if u["digaji"] and not digaji:
-            g = gaji_info(self.db, u)
+            g = saldo_info(self.db, u)
+            g["jumlah"] = g["saldo"]
             if g["jumlah"] > 0:
                 if self.f.get("konfirmasi_nonaktif") != "1":
                     return self.konfirmasi_nonaktif_gaji(u, akses, pct, g)

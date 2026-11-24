@@ -22,6 +22,9 @@ Fase 2:
   "Gaji hari ini". Halaman Gaji dan Beranda dimuat ulang otomatis tiap 1 menit. Admin bisa mengatur "Gaji dihitung mulai".
 - Hapus user = nonaktifkan: tidak bisa masuk, sesi dihentikan, hilang dari daftar aktif dan Gaji; nama tetap di catatan
   lama; username tidak bisa dipakai lagi. Tidak bisa hapus diri sendiri atau admin terakhir.
+- Pengambilan gaji (pilihan C): saldo = gaji terkumpul periode ini - yang sudah diambil. "Ambil sebagian" mengurangi
+  saldo tanpa menutup periode; "Bayar semua" membayar seluruh saldo dan menutup periode. Saldo negatif = diambil lebih,
+  dikurangkan dari gaji berikutnya. Pengambilan yang salah catat bisa dibatalkan (ditandai, tidak dihapus).
 
 Tampilan baru:
 - Beranda: header berwarna (penjualan hari ini, jumlah batch, terjual, sisa), menu berkelompok dalam kartu
