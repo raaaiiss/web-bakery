@@ -1,4 +1,4 @@
-# Pencatatan Web Bakery (prototype, fase 2)
+# Pencatatan Web Bakery
 
 Pengganti buku catatan: produksi harian, sisa saat tutup, laporan, dan gaji pembuat kue.
 
@@ -35,7 +35,7 @@ Tampilan baru:
 - Sisa per batch: halaman Sisa menampilkan batch hari itu; halaman "Sisa per hari" menampilkan sisa
   per kue per hari (habis / ada sisa / belum diisi) dan daftar batch per tanggal buat.
 
-Fase 3 (sudah di kode, belum di-commit):
+Fase 3:
 - **Unduh Excel** (khusus admin): menu Lainnya → Unduh Excel. Satu file `.xlsx` berisi lembar Produksi, Sisa,
   Gaji (saldo sekarang), dan Riwayat gaji. Angkanya memakai rumus yang sama dengan halaman Laporan dan Gaji.
   Dibuat dengan modul bawaan Python, tanpa pustaka tambahan.
@@ -44,8 +44,6 @@ Fase 3 (sudah di kode, belum di-commit):
   pada jam itu, backup dibuat saat aplikasi menyala, tetap paling banyak sekali per hari.
   Hanya **7 hari terakhir** yang disimpan (`KUE_BACKUP_HARI`); backup harian yang lebih tua dihapus otomatis
   setelah salinan baru jadi. File lain (misalnya `data/toko-sebelum-*.db`) tidak disentuh. Memulihkan: matikan aplikasi, salin file backup ke `data/toko.db`, nyalakan lagi.
-
-Belum ada: push ke GitHub (menunggu persetujuan pemilik).
 
 ### Pembaruan database
 Saat `app.py` versi fase 2 pertama kali jalan, database lama otomatis dinaikkan ke versi 2: hanya menambah
