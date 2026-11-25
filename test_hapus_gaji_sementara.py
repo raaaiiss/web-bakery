@@ -72,12 +72,16 @@ class TestGajiSementara(Bantuan):
         self.assertLess(h2["jumlah"], h["jumlah"])
         self.assertIn('<span class="lencana pasti">pasti</span>', self.admin.get("/gaji")[1])
 
-    def test_muat_ulang_otomatis_di_gaji_dan_beranda(self):
+    def test_tidak_ada_muat_ulang_otomatis_hanya_tombol(self):
+        # Pemilik: jangan refresh tiap 1 menit, perbarui hanya saat orang berinteraksi.
         for path in ("/", "/gaji"):
             html = self.admin.get(path)[1]
-            self.assertIn("segarkan", html.split("<body")[1].split(">")[0], path)
-            self.assertIn("Diperbarui", html)
-        self.assertNotIn("segarkan", self.admin.get("/laporan")[1].split("<body")[1].split(">")[0])
+            self.assertIn(f'<a class="muat" href="{path}" aria-label="Muat ulang"', html, path)
+            self.assertNotIn("Diperbarui", html, path)
+            self.assertNotIn("otomatis tiap", html, path)
+            self.assertNotIn("setInterval", html, path)
+            self.assertNotIn("location.reload", html, path)
+        self.assertNotIn('class="muat"', self.admin.get("/laporan")[1])
 
     def test_tanggal_mulai_gaji_diatur_admin(self):
         u, _ = self.buat("baru")
@@ -140,7 +144,7 @@ class TestHapusUser(Bantuan):
         with urllib.request.urlopen(req) as r:
             self.assertTrue(r.url.endswith("/login"))
         # catatan lama tetap menyebut namanya; tampil di daftar dihapus; tercatat di Riwayat
-        self.assertIn("Budi (dihapus)", self.admin.get("/produksi")[1])
+        self.assertIn("Budi (dihapus)", self.admin.get(f"/produksi?tanggal={app.today()}")[1])
         pengguna = self.admin.get("/pengguna")[1]
         self.assertIn("Budi", pengguna.split("Pengguna yang dihapus")[1])
         self.assertIn("hapus pengguna", [r[0] for r in self.db().execute("SELECT action FROM audit")])

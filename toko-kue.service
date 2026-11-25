@@ -1,7 +1,7 @@
 # Contoh service systemd: aplikasi nyala otomatis saat home server hidup.
 # Sesuaikan User dan path, lalu lihat README bagian "Nyala otomatis".
 [Unit]
-Description=Pencatatan Toko Kue
+Description=Pencatatan Web Bakery
 After=network.target
 
 [Service]

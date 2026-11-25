@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Pencatatan Toko Kue, prototype versi 1.
+"""Pencatatan Web Bakery, prototype versi 1.
 
 Hanya memakai pustaka bawaan Python 3.9+ (http.server + sqlite3), jadi tidak perlu install apa pun.
 Jalankan:  python3 app.py      lalu buka http://<ip-server>:8000 dari HP di wifi toko.
 """
 import hashlib
+import io
+import threading
+import zipfile
 import html
 import json
 import base64
@@ -20,12 +23,15 @@ from zoneinfo import ZoneInfo
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("KUE_DB", os.path.join(BASE, "data", "toko.db"))
-TZ = ZoneInfo(os.environ.get("KUE_TZ", "Asia/Jakarta"))
+TZ = ZoneInfo(os.environ.get("KUE_TZ", "Asia/Jayapura"))  # WIT (UTC+9), sesuai lokasi toko
 HOST = os.environ.get("KUE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("KUE_PORT", "8000"))
 SESSION_DAYS = 30
-# Nama toko untuk judul, ikon layar utama, dan manifest. Nama asli toko belum diberikan pemilik.
-NAMA_TOKO = os.environ.get("KUE_NAMA_TOKO", "Toko Kue")
+# Nama toko untuk judul, ikon layar utama, dan manifest. Dipilih pemilik: "Web Bakery".
+NAMA_TOKO = os.environ.get("KUE_NAMA_TOKO", "Web Bakery")
+BACKUP_DIR = os.environ.get("KUE_BACKUP_DIR", os.path.join(BASE, "data", "backup"))
+BACKUP_JAM = os.environ.get("KUE_BACKUP_JAM", "00:05")  # jam backup harian (WIT); kosong = backup otomatis mati
+BACKUP_HARI = int(os.environ.get("KUE_BACKUP_HARI", "7"))  # backup harian disimpan sekian hari terakhir
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -260,6 +266,9 @@ def migrasi_tampilan(db):
             db.execute("ALTER TABLE cakes ADD COLUMN color TEXT")
         if "photo" not in kolom:
             db.execute("ALTER TABLE cakes ADD COLUMN photo TEXT")
+        # Tanda batch sudah dikoreksi karyawan: karyawan hanya boleh koreksi sekali, admin bebas.
+        if "dikoreksi" not in {r[1] for r in db.execute("PRAGMA table_info(production)")}:
+            db.execute("ALTER TABLE production ADD COLUMN dikoreksi INTEGER NOT NULL DEFAULT 0")
 
 
 def warna_kue(k):
@@ -390,11 +399,165 @@ def lencana(sementara):
             else '<span class="lencana pasti">pasti</span>')
 
 
+# ---------- fase 3: unduh Excel & backup otomatis ----------
+
+def _kolom(i):
+    """0 -> A, 25 -> Z, 26 -> AA (nama kolom Excel)."""
+    nama = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        nama = chr(65 + r) + nama
+    return nama
+
+
+def _sel(ref, v, gaya=0):
+    if v is None or v == "":
+        return ""
+    s = f' s="{gaya}"' if gaya else ""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return f'<c r="{ref}"{s}><v>{v}</v></c>'
+    teks = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(v))
+    return f'<c r="{ref}"{s} t="inlineStr"><is><t xml:space="preserve">{html.escape(teks, quote=False)}</t></is></c>'
+
+
+def buat_xlsx(lembar):
+    """File Excel (.xlsx) dari [(nama lembar, [baris judul, baris data...])]. Tanpa pustaka tambahan."""
+    xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", xml + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                   '<Default Extension="xml" ContentType="application/xml"/>'
+                   '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                   '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+                   + "".join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                             for i in range(1, len(lembar) + 1)) + "</Types>")
+        z.writestr("_rels/.rels", xml + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   f'<Relationship Id="rId1" Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        z.writestr("xl/workbook.xml", xml + f'<workbook {ns} xmlns:r="{rel}"><sheets>' + "".join(
+            f'<sheet name="{html.escape(n[:31])}" sheetId="{i}" r:id="rId{i}"/>' for i, (n, _) in enumerate(lembar, 1))
+                   + "</sheets></workbook>")
+        z.writestr("xl/_rels/workbook.xml.rels", xml + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   + "".join(f'<Relationship Id="rId{i}" Type="{rel}/worksheet" Target="worksheets/sheet{i}.xml"/>'
+                             for i in range(1, len(lembar) + 1))
+                   + f'<Relationship Id="rId{len(lembar) + 1}" Type="{rel}/styles" Target="styles.xml"/></Relationships>')
+        z.writestr("xl/styles.xml", xml + f'<styleSheet {ns}><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
+                   '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
+                   '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
+                   '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+                   '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+                   '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+                   '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>'
+                   '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>')
+        for i, (_, baris) in enumerate(lembar, 1):
+            lebar = [max(len(str(b[k])) if k < len(b) and b[k] is not None else 0 for b in baris) for k in range(len(baris[0]))]
+            cols = "".join(f'<col min="{k + 1}" max="{k + 1}" width="{min(max(w + 2, 8), 60)}" customWidth="1"/>'
+                           for k, w in enumerate(lebar))
+            data = "".join(f'<row r="{r}">' + "".join(_sel(f"{_kolom(k)}{r}", v, 1 if r == 1 else 0) for k, v in enumerate(b))
+                           + "</row>" for r, b in enumerate(baris, 1))
+            z.writestr(f"xl/worksheets/sheet{i}.xml", xml + f'<worksheet {ns}><sheetViews><sheetView workbookViewId="0">'
+                       '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+                       f'<cols>{cols}</cols><sheetData>{data}</sheetData></worksheet>')
+    return buf.getvalue()
+
+
+def data_excel(db):
+    """Isi file unduhan: Produksi, Sisa, Gaji (saldo sekarang), Riwayat gaji. Angka uang dari rumus aplikasi."""
+    produksi = [["Tanggal", "Kue", "Jumlah", "Harga jual", "Harga modal", "Diinput (WIT)", "Oleh"]] + [
+        [r["date"], r["kue"], r["qty"], r["price_sell"], r["price_cost"], r["created"][:16], r["oleh"]]
+        for r in db.execute("""SELECT p.*, c.name kue, u.name oleh FROM production p JOIN cakes c ON c.id = p.cake_id
+                               JOIN users u ON u.id = p.user_id ORDER BY p.date, p.id""")]
+    sisa = [["Tanggal", "Kue", "Dibuat", "Sisa", "Terjual", "Harga jual", "Omzet", "Kerugian sisa", "Keterangan"]]
+    for (d,) in db.execute("SELECT DISTINCT date FROM production ORDER BY date"):
+        for i in laporan_harian(db, d)["items"]:
+            sisa.append([d, i["nama"], i["dibuat"], i["sisa"] if i["sisa_diisi"] else None, i["terjual"],
+                         i["harga_jual"], i["omzet"], i["kerugian"], "" if i["sisa_diisi"] else "sisa belum diisi"])
+    gaji = [["Nama", "Persen", "Periode mulai", "Sampai", "Omzet periode", "Gaji terkumpul", "Sudah diambil", "Saldo", "Status"]]
+    for u in db.execute("SELECT * FROM users WHERE aktif = 1 AND digaji = 1 AND role = 'karyawan' ORDER BY name"):
+        g = saldo_info(db, u)
+        gaji.append([u["name"], g["pct"], g["mulai"], g["sampai"], g["omzet"], g["terkumpul"], g["diambil"], g["saldo"],
+                     "sementara" if g["sementara"] else "pasti"])
+    riwayat = [["Jenis", "Nama", "Tanggal", "Jumlah", "Periode", "Catatan", "Dibatalkan"]]
+    for r in db.execute("""SELECT w.*, u.name FROM wage_payments w JOIN users u ON u.id = w.user_id ORDER BY w.paid_at"""):
+        riwayat.append(["Bayar semua", r["name"], r["paid_at"][:16], r["amount"], f"{r['period_start']} s/d {r['period_end']}", "", ""])
+    for r in db.execute("""SELECT w.*, u.name FROM wage_withdrawals w JOIN users u ON u.id = w.user_id ORDER BY w.created_at"""):
+        riwayat.append(["Ambil sebagian", r["name"], r["tanggal"], r["amount"], "", r["catatan"],
+                        f"ya: {r['alasan_batal'] or ''}" if r["dibatalkan"] else ""])
+    return [("Produksi", produksi), ("Sisa", sisa), ("Gaji", gaji), ("Riwayat gaji", riwayat)]
+
+
+def backup_harian(db_path=None, folder=None, simpan_hari=None):
+    """Salin database ke folder backup, SEKALI per hari (WIT): toko-YYYY-MM-DD.db.
+    Kalau file hari ini sudah ada, tidak menyalin lagi. Setelah salinan baru utuh, backup harian yang lebih tua dari
+    `simpan_hari` hari dihapus (hari ini ikut dihitung). File lain di folder itu tidak pernah disentuh.
+    Pakai backup API SQLite, jadi aman walau aplikasi sedang menulis."""
+    db_path, folder = db_path or DB_PATH, folder or BACKUP_DIR
+    simpan_hari = BACKUP_HARI if simpan_hari is None else simpan_hari
+    os.makedirs(folder, exist_ok=True)
+    tujuan = os.path.join(folder, f"toko-{today()}.db")
+    if os.path.exists(tujuan):
+        return None  # hari ini sudah dibackup
+    sementara = tujuan + ".baru"
+    src = sqlite3.connect(db_path)
+    try:
+        dst = sqlite3.connect(sementara)
+        with dst:
+            src.backup(dst)
+        dst.close()
+    finally:
+        src.close()
+    os.replace(sementara, tujuan)  # nama akhir baru dipakai setelah salinan utuh
+    if simpan_hari > 0:
+        batas = (date.fromisoformat(today()) - timedelta(days=simpan_hari - 1)).isoformat()
+        for f in os.listdir(folder):
+            m = re.fullmatch(r"toko-(\d{4}-\d{2}-\d{2})\.db", f)
+            if m and m.group(1) < batas:
+                os.remove(os.path.join(folder, f))
+                print(f"backup lama dihapus: {f}", flush=True)
+    return tujuan
+
+
+def detik_sampai(jam, sekarang=None):
+    """Detik dari `sekarang` sampai jam "HH:MM" (WIT) berikutnya."""
+    sekarang = sekarang or now()
+    h, m = (int(x) for x in jam.split(":"))
+    target = sekarang.replace(hour=h, minute=m, second=0, microsecond=0)
+    if target <= sekarang:
+        target += timedelta(days=1)
+    return (target - sekarang).total_seconds()
+
+
+def mulai_backup_berkala(jam=None):
+    """Backup sekali sehari di thread latar: saat aplikasi menyala (kalau hari ini belum ada backup),
+    lalu tiap hari pada `jam` WIT. Gagal dicatat di log, aplikasi jalan terus."""
+    jam = BACKUP_JAM if jam is None else jam
+    if not jam:
+        return None
+    detik_sampai(jam)  # jam yang salah tulis langsung ketahuan saat aplikasi menyala
+    berhenti = threading.Event()
+
+    def kerja():
+        while True:
+            try:
+                hasil = backup_harian()
+                print(f"backup: {hasil}" if hasil else "backup: hari ini sudah ada, dilewati", flush=True)
+            except Exception as g:  # jangan sampai backup gagal mematikan aplikasi
+                print(f"backup GAGAL: {g!r}", flush=True)
+            if berhenti.wait(detik_sampai(jam)):
+                return
+
+    threading.Thread(target=kerja, name="backup", daemon=True).start()
+    return berhenti
+
+
 # ---------- tampilan ----------
 # Arah desain (disetujui pemilik): "etalase roti pagi hari". Krem kertas, tinta kakao, tombol kulit roti,
 # garis tipis (tanpa bayangan), ikon garis SVG, angka penting besar, aksi utama di zona jempol.
 
-FONTS = {"karla.woff2", "playfair.woff2"}
+FONTS = {"karla.woff2", "poppins-600.woff2", "poppins-700.woff2"}
 IKON_FILE = {"ikon-192.png", "ikon-512.png", "ikon-maskable-512.png", "apple-touch-icon-180.png"}
 WARNA_LATAR = "#F7F1E6"
 
@@ -403,7 +566,7 @@ def manifest():
     """Web app manifest untuk "Tambahkan ke layar utama". Sengaja TANPA service worker: data selalu dari server."""
     return {
         "name": f"{NAMA_TOKO} — Catatan Harian",
-        "short_name": NAMA_TOKO[:12],
+        "short_name": NAMA_TOKO,
         "description": "Catatan produksi, sisa, laporan, dan gaji toko kue",
         "lang": "id",
         "start_url": "/",
@@ -438,13 +601,14 @@ def kepala_html(judul):
 
 CSS = """
 @font-face{font-family:Karla;src:url(/static/fonts/karla.woff2) format('woff2');font-weight:400 800;font-display:swap}
-@font-face{font-family:Playfair;src:url(/static/fonts/playfair.woff2) format('woff2');font-weight:600 700;font-display:swap}
+@font-face{font-family:Poppins;src:url(/static/fonts/poppins-600.woff2) format('woff2');font-weight:600;font-display:swap}
+@font-face{font-family:Poppins;src:url(/static/fonts/poppins-700.woff2) format('woff2');font-weight:700;font-display:swap}
 :root{
   --bg:#F7F1E6;--surface:#FFFBF4;--tint:#F1E4D1;--line:#E6D9C3;--line-strong:#CDB89B;
   --ink:#2E1F14;--ink-2:#6B5644;--crust:#92400E;--crust-press:#74330B;--on-crust:#FFFFFF;
   --olive:#4F6B2D;--terra:#B4532A;--terra-text:#93401C;--danger:#B3261E;--cream-on-dark:#F7E9D4;
   --r:14px;--r-sm:10px;--nav-h:64px;--bar-h:84px;
-  --serif:Playfair,Georgia,serif;--sans:Karla,system-ui,-apple-system,sans-serif;
+  --serif:Poppins,Karla,system-ui,-apple-system,sans-serif;--sans:Karla,system-ui,-apple-system,sans-serif;
   color-scheme:light}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
@@ -456,12 +620,28 @@ a{color:var(--crust);text-underline-offset:3px}
 /* kerangka */
 .atas{display:flex;align-items:center;gap:12px;padding:max(14px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) 0 max(20px,env(safe-area-inset-left));max-width:760px;margin:0 auto}
 .merek{font:700 19px/1 var(--serif);color:var(--crust);text-decoration:none;letter-spacing:.2px}
-.atas .siapa{margin-left:auto;font-size:14px;color:var(--ink-2)}
 .atas form{margin:0}
+.profil{margin-left:auto;position:relative}
+.profil summary{list-style:none;display:flex;align-items:center;gap:6px;min-height:44px;padding:0 12px;margin-right:-12px;border-radius:999px;cursor:pointer;font:600 15px/1 var(--sans);color:var(--ink-2)}
+.profil summary::-webkit-details-marker{display:none}
+.profil summary::marker{content:""}
+.profil summary:hover,.profil summary:focus-visible{background:var(--tint);color:var(--ink)}
+.profil summary .ikon{width:18px;height:18px}
+.profil[open] summary{background:var(--tint);color:var(--ink)}
+.menu-profil{position:absolute;right:0;top:calc(100% + 4px);z-index:30;min-width:210px;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r);padding:6px;box-shadow:0 12px 28px rgba(46,31,20,.18)}
+.menu-profil .akun{display:block;padding:8px 10px 10px;font-size:14px;color:var(--ink-2);border-bottom:1px solid var(--line)}
+.menu-profil .akun b{display:block;font:700 16px/1.2 var(--sans);color:var(--ink)}
+.menu-profil form{margin:0}
+.menu-profil button{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;margin-top:4px;padding:0 10px;background:none;border:0;border-radius:var(--r-sm);font:600 16px/1 var(--sans);color:var(--danger);cursor:pointer;text-align:left}
+.menu-profil button:hover,.menu-profil button:focus-visible{background:var(--tint)}
 main{max-width:760px;margin:0 auto;padding:8px max(20px,env(safe-area-inset-right)) calc(var(--nav-h) + 32px + env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
 body.ada-bar main{padding-bottom:calc(var(--nav-h) + var(--bar-h) + 32px + env(safe-area-inset-bottom))}
 body.tanpa-nav main{padding-bottom:calc(32px + env(safe-area-inset-bottom))}
 body.tanpa-nav.ada-bar main{padding-bottom:calc(var(--bar-h) + 32px + env(safe-area-inset-bottom))}
+.kembali{display:inline-flex;align-items:center;gap:4px;min-height:44px;margin:6px 0 0 -10px;padding:0 14px 0 6px;border-radius:999px;color:var(--crust);text-decoration:none;font:600 16px/1 var(--sans)}
+.kembali:hover,.kembali:focus-visible,.kembali:active{background:var(--tint);color:var(--crust-press)}
+.kembali + .alis{margin-top:6px}
+.kembali + h1{margin-top:8px}
 .alis{margin:20px 0 2px;font-size:14px;font-weight:600;letter-spacing:.6px;text-transform:uppercase;color:var(--ink-2)}
 h1{font:700 30px/1.15 var(--serif);margin:0 0 20px;letter-spacing:-.2px}
 h2{font:700 13px/1.3 var(--sans);letter-spacing:.8px;text-transform:uppercase;color:var(--ink-2);margin:32px 0 8px}
@@ -593,7 +773,11 @@ details[open]>summary .biasa{color:var(--ink-2)}
 .hari-ini{padding:12px 0 4px;font-weight:600;font-size:16px}
 .hari-ini b{font:800 20px var(--sans);white-space:nowrap}
 .hari-ini>span:first-child{min-width:0}
-.diperbarui{font-size:13px;color:var(--ink-2);margin:-12px 0 14px}
+.judul{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 20px}
+.judul h1{margin:0}
+.muat{display:flex;flex:none;align-items:center;justify-content:center;width:44px;height:44px;margin-right:-10px;border-radius:999px;color:var(--ink-2)}
+.muat .ikon{width:22px;height:22px}
+.muat:hover,.muat:active,.muat:focus-visible{background:var(--tint);color:var(--crust)}
 .akibat{margin:0 0 16px;padding-left:20px;line-height:1.6}
 .tombol.bahaya{background:var(--danger);border-color:var(--danger)}
 .tombol.bahaya:active{background:#8E1D17;border-color:#8E1D17}
@@ -613,6 +797,9 @@ li.batal .nama,li.batal .kanan{text-decoration:line-through;color:var(--ink-2)}
 .pilih a{flex:1;justify-content:center;white-space:nowrap;min-height:44px;display:flex;align-items:center;padding:0 6px;border-radius:999px;border:1.5px solid var(--line-strong);
   color:var(--ink);text-decoration:none;font-weight:700;font-size:15px;background:var(--surface)}
 .pilih a[aria-current]{background:var(--ink);border-color:var(--ink);color:#fff}
+.tab-sisa{display:flex;gap:4px;padding:4px;margin:0 0 16px;background:var(--tint);border-radius:999px}
+.tab-sisa a{flex:1;display:flex;align-items:center;justify-content:center;min-height:44px;border-radius:999px;color:var(--ink-2);text-decoration:none;font-weight:700;font-size:15px}
+.tab-sisa a[aria-current]{background:var(--surface);color:var(--crust);box-shadow:0 1px 3px rgba(46,31,20,.15)}
 .rentang{display:grid;grid-template-columns:1fr 1fr;gap:0 10px;align-items:end;margin-bottom:8px}
 .rentang>div{min-width:0}.rentang input{min-width:0;padding:0 10px}
 .rentang label{margin:4px 0 6px;font-size:14px}
@@ -747,10 +934,12 @@ var d=c.toDataURL('image/jpeg',0.82);box.querySelector('input[name=foto_data]').
 p.className='gbr pratinjau';p.style.background='';p.innerHTML='<img alt="" src="'+d+'">';};img.src=r.result;};
 r.readAsDataURL(t.files[0]);});
 document.querySelectorAll('.geser').forEach(function(g){g.scrollLeft=g.scrollWidth;});
-if(document.body.classList.contains('segarkan')){setInterval(function(){
-if(document.visibilityState!=='visible')return;var a=document.activeElement;
-if(a&&/INPUT|TEXTAREA|SELECT/.test(a.tagName))return;if(document.querySelector('details[open] form'))return;
-location.reload();},60000);}"""
+document.addEventListener('click',function(ev){var p=ev.target.closest('details[data-profil]');
+document.querySelectorAll('details[data-profil][open]').forEach(function(d){if(d!==p)d.open=false;});});
+document.querySelectorAll('a[data-riwayat]').forEach(function(a){a.addEventListener('click',function(ev){
+if(history.length>1){ev.preventDefault();history.back();}});});
+document.addEventListener('keydown',function(ev){if(ev.key!=='Escape')return;
+document.querySelectorAll('details[data-profil][open]').forEach(function(d){d.open=false;});});"""
 
 IKON = {
     "beranda": '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/>',
@@ -759,7 +948,9 @@ IKON = {
     "laporan": '<path d="M3 21h18"/><path d="M6 17v-5"/><path d="M11 17V7"/><path d="M16 17v-8"/><path d="M21 17V4"/>',
     "lainnya": '<path d="M4 6h16M4 12h16M4 18h16"/>',
     "kiri": '<path d="m15 18-6-6 6-6"/>',
+    "ulang": '<path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/>',
     "kanan": '<path d="m9 18 6-6-6-6"/>',
+    "bawah": '<path d="m6 9 6 6 6-6"/>',
     "plus": '<path d="M12 5v14M5 12h14"/>',
     "minus": '<path d="M5 12h14"/>',
     "cek": '<path d="M20 6 9 17l-5-5"/>',
@@ -768,6 +959,7 @@ IKON = {
     "orang": '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
     "jam": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     "dompet": '<path d="M4 7h15a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a2 2 0 0 1 2-2h11v3"/><path d="M16 13.5h.01"/>',
+    "unduh": '<path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/>',
     "kalender": '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/><path d="M8 14h.01M12 14h.01M16 14h.01M8 17.5h.01M12 17.5h.01"/>',
     "keluar": '<path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h10"/>',
 }
@@ -796,6 +988,13 @@ def stepper(nama, nilai, label, maks=None, lebar=False, form=None, kelas=""):
       <button type="button" data-langkah="-1" aria-label="Kurangi {e(label)}">{ikon("minus")}</button>
       <input name="{nama}" value="{e(nilai)}" inputmode="numeric" pattern="[0-9]*" placeholder="0" aria-label="{e(label)}"{m}>
       <button type="button" data-langkah="1" aria-label="Tambah {e(label)}">{ikon("plus")}</button></div>"""
+
+
+def tab_sisa(aktif):
+    """Dua pilihan di atas tab Sisa: isi sisa hari ini, atau lihat sisa per kue per hari."""
+    return '<nav class="tab-sisa" aria-label="Tampilan sisa">' + "".join(
+        f'<a href="{h}"{" aria-current=page" if h == aktif else ""}>{t}</a>'
+        for h, t in (("/sisa", "Catat sisa"), ("/sisa-harian", "Sisa per hari"))) + "</nav>"
 
 
 def form_tanggal(aksi, tgl):
@@ -845,6 +1044,7 @@ ROUTES = {
     ("GET", "/pengguna/:id/hapus"): ("hapus_form", "admin"),
     ("POST", "/pengguna/:id/hapus"): ("pengguna_hapus", "admin"),
     ("GET", "/riwayat"): ("riwayat", "admin"),
+    ("GET", "/unduh-excel"): ("unduh_excel", "admin"),
 }
 
 class App(BaseHTTPRequestHandler):
@@ -912,8 +1112,7 @@ class App(BaseHTTPRequestHandler):
                 raise Gagal("Kamu belum punya akses untuk ini. Minta admin mencentangnya di menu Pengguna.", 403)
             getattr(self, nama)()
         except Gagal as g:
-            back = '<p><a href="javascript:history.back()">Kembali</a></p>'
-            self.page("Ada masalah", kabar("galat", e(g)) + back, g.status)
+            self.page("Ada masalah", kabar("galat", e(g)), g.status)
         finally:
             self.db.close()
 
@@ -984,7 +1183,7 @@ class App(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
 
-    def page(self, judul, isi, status=200, alis="", bar="", h1=None, segarkan=False):
+    def page(self, judul, isi, status=200, alis="", bar="", h1=None, muat_ulang=False):
         u = getattr(self, "user", None)
         menu = self.menu() if u else []
         pakai_nav = len(menu) >= 2
@@ -1002,23 +1201,52 @@ class App(BaseHTTPRequestHandler):
                 for h, t, i in menu) + "</nav>"
         atas = ""
         if u:
-            ada_lainnya = any(h == "/lainnya" for h, _, _ in menu)
-            keluar = "" if ada_lainnya else ('<form method="post" action="/logout"><button class="biasa">Keluar</button></form>')
-            atas = f'<div class="atas"><a class="merek" href="/">{e(NAMA_TOKO)}</a><span class="siapa">{e(u["name"])}</span>{keluar}</div>'
+            atas = (f'<div class="atas"><a class="merek" href="/">{e(NAMA_TOKO)}</a>'
+                    f'<details class="profil" data-profil><summary aria-label="Akun {e(u["name"])}, buka menu">'
+                    f'<span>{e(u["name"])}</span>{ikon("bawah")}</summary>'
+                    f'<div class="menu-profil"><span class="akun"><b>{e(u["name"])}</b>'
+                    f'{e("Admin" if u["role"] == "admin" else "Karyawan")}</span>'
+                    f'<form method="post" action="/logout"><button type="submit">{ikon("keluar")}Keluar</button></form>'
+                    f'</div></details></div>')
+        kembali = ""
+        if u and urlparse(self.path).path != "/":
+            tujuan, riwayat = (("/", " data-riwayat") if status >= 400
+                               else (self.tujuan_kembali([h for h, _, _ in menu]), ""))
+            kembali = f'<a class="kembali" href="{tujuan}"{riwayat}>{ikon("kiri")}Kembali</a>'
         pesan = kabar("ok", e(self.q["pesan"])) if self.q.get("pesan") else ""
         alis = f'<p class="alis">{alis}</p>' if alis else ""
-        diperbarui = ""
-        if segarkan:
-            kelas.append("segarkan")
-            diperbarui = (f'<p class="diperbarui">Diperbarui {now().strftime("%H:%M")} · otomatis tiap 1 menit · '
-                          f'<a href="{e(self.path)}">Muat ulang</a></p>')
+        judul_html = f"<h1>{h1 or e(judul)}</h1>"
+        if muat_ulang:  # hanya dimuat ulang saat orang menekannya; tidak ada refresh otomatis
+            judul_html = (f'<div class="judul">{judul_html}<a class="muat" href="{urlparse(self.path).path}" '
+                          f'aria-label="Muat ulang" title="Muat ulang">{ikon("ulang")}</a></div>')
         self.send(status, f"""<!doctype html><html lang="id"><head>{kepala_html(judul)}
 <link rel="preload" href="/static/fonts/karla.woff2" as="font" type="font/woff2" crossorigin>
 <style>{CSS}</style></head><body class="{' '.join(kelas)}">{atas}
-<main>{alis}<h1>{h1 or e(judul)}</h1>{pesan}{diperbarui}{isi}</main>{bar}{nav}<script>{JS}</script></body></html>""")
+<main>{kembali}{alis}{judul_html}{pesan}{isi}</main>{bar}{nav}<script>{JS}</script></body></html>""")
+
+    def tujuan_kembali(self, hrefs):
+        """Halaman induk untuk tombol Kembali: tempat orang biasanya datang ke halaman ini."""
+        bagian = urlparse(self.path).path.split("/")[1]
+        if bagian == "pengguna" and urlparse(self.path).path != "/pengguna":
+            return "/pengguna"
+        if bagian == "sisa-harian":
+            return next((h for h in ("/sisa", "/laporan") if h in hrefs), "/")
+        if bagian in ("gaji", "gaji-ambil", "kue", "pengguna", "riwayat") and "/lainnya" in hrefs:
+            return "/lainnya"
+        return "/"
 
     def admin(self):
         return bool(self.user) and self.user["role"] == "admin"
+
+    def unduh_excel(self):
+        data = buat_xlsx(data_excel(self.db))
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Disposition", f'attachment; filename="web-bakery-{today()}.xlsx"')
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
     def boleh(self, perm):
         return self.admin() or perm in self.akses
@@ -1050,7 +1278,8 @@ class App(BaseHTTPRequestHandler):
             m.append(("/kue", "kue", "Daftar kue dan harga", "Tambah kue, ubah harga"))
         if self.admin():
             m += [("/pengguna", "orang", "Pengguna dan akses", "Tambah karyawan, centang akses, persen gaji, password"),
-                  ("/riwayat", "jam", "Riwayat perubahan", "Siapa mengubah apa dan kapan")]
+                  ("/riwayat", "jam", "Riwayat perubahan", "Siapa mengubah apa dan kapan"),
+                  ("/unduh-excel", "unduh", "Unduh Excel", "Produksi, sisa, dan gaji dalam satu file")]
         return m
 
     # --- setup & login ---
@@ -1207,7 +1436,7 @@ class App(BaseHTTPRequestHandler):
         if self.boleh("sisa"):
             tombol.append(f'<a class="tombol{" garis" if tombol else ""}" href="/sisa">Catat sisa tutup</a>')
         bar = bar_aksi(*tombol) if tombol else ""
-        self.page("Beranda", isi, alis=tgl_indo(tgl), bar=bar, h1="Hari ini", segarkan=True)
+        self.page("Beranda", isi, alis=tgl_indo(tgl), bar=bar, h1="Hari ini", muat_ulang=True)
 
     def lainnya(self):
         menu = self.menu_lainnya()
@@ -1222,7 +1451,8 @@ class App(BaseHTTPRequestHandler):
     # --- produksi ---
 
     def boleh_ubah(self, row):
-        return self.admin() or (row["user_id"] == self.user["id"] and row["date"] == today())
+        """Admin selalu boleh. Karyawan: batch buatannya sendiri, hari itu, dan belum pernah dikoreksi (sekali saja)."""
+        return self.admin() or (row["user_id"] == self.user["id"] and row["date"] == today() and not row["dikoreksi"])
 
     def produksi(self):
         tgl = tanggal(self.q["tanggal"]) if self.admin() and self.q.get("tanggal") else today()
@@ -1254,13 +1484,19 @@ class App(BaseHTTPRequestHandler):
             for r in rows:
                 ubah = ""
                 if self.boleh_ubah(r):
-                    ubah = f"""<details><summary><span class="biasa">Koreksi</span></summary><div class="panel">
-                      <form method="post" action="/produksi/{r['id']}/ubah">
+                    sekali, tanya = "", ""
+                    if not self.admin():
+                        sekali = '<p class="bantu" style="margin:0 0 8px">Koreksi hanya bisa <b>sekali</b>. Setelah itu minta admin.</p>'
+                        tanya = " onsubmit=\"return confirm('Koreksi hanya bisa sekali. Simpan jumlah ini?')\""
+                    ubah = f"""<details><summary><span class="biasa">Koreksi</span></summary><div class="panel">{sekali}
+                      <form method="post" action="/produksi/{r['id']}/ubah"{tanya}>
                       <label for="q{r['id']}">Jumlah yang benar</label>
                       <div class="baris"><input id="q{r['id']}" name="qty" value="{r['qty']}" inputmode="numeric" style="max-width:140px">
                       <button class="tombol sedang">Simpan</button></div></form>
                       <form method="post" action="/produksi/{r['id']}/hapus" onsubmit="return confirm('Hapus batch ini?')">
                       <button class="teks-merah">Hapus batch ini</button></form></div></details>"""
+                elif r["dikoreksi"] and r["user_id"] == self.user["id"]:
+                    ubah = '<p class="bantu" style="margin:6px 0 0">Sudah dikoreksi. Perubahan lagi minta admin.</p>'
                 k = {"id": r["cid"], "name": r["kue"], "color": r["color"], "photo": r["photo"]}
                 isi += f"""<li><div class="baris">{gambar_kue(k, "gbr mini")}<span style="min-width:0"><span class="nama">{e(r['kue'])}</span>
                   <span class="info" style="margin:2px 0 0"><span>{r['created'][11:16]}</span><span>{e(r['oleh'])}</span></span></span>
@@ -1288,7 +1524,7 @@ class App(BaseHTTPRequestHandler):
         if not r:
             raise Gagal("Data tidak ditemukan.", 404)
         if not self.boleh_ubah(r):
-            raise Gagal("Batch hanya bisa dikoreksi pembuatnya di hari yang sama. Setelah itu minta admin.", 403)
+            raise Gagal("Batch hanya bisa dikoreksi sekali oleh pembuatnya di hari yang sama. Setelah itu minta admin.", 403)
         baru = 0 if hapus else angka(self.f.get("qty"), "Jumlah", 1)
         total = self.db.execute("SELECT SUM(qty) FROM production WHERE date = ? AND cake_id = ?",
                                 (r["date"], r["cake_id"])).fetchone()[0]
@@ -1300,7 +1536,8 @@ class App(BaseHTTPRequestHandler):
             if hapus:
                 self.db.execute("DELETE FROM production WHERE id = ?", (r["id"],))
             else:
-                self.db.execute("UPDATE production SET qty = ? WHERE id = ?", (baru, r["id"]))
+                self.db.execute("UPDATE production SET qty = ?, dikoreksi = dikoreksi + ? WHERE id = ?",
+                                (baru, 0 if self.admin() else 1, r["id"]))
             catat(self.db, self.user["id"], "hapus produksi" if hapus else "ubah produksi",
                   f"{r['date']} {r['kue']} batch #{r['id']}: {r['qty']} -> {baru}")
         self.redirect(f"/produksi?tanggal={r['date']}", "Batch dihapus." if hapus else "Batch diubah.")
@@ -1323,7 +1560,7 @@ class App(BaseHTTPRequestHandler):
         batch = {}
         for b in self.db.execute("SELECT cake_id, qty, created FROM production WHERE date = ? ORDER BY id", (tgl,)):
             batch.setdefault(b["cake_id"], []).append(f'{b["qty"]} pcs ({b["created"][11:16]})')
-        isi = form_tanggal("/sisa", tgl) if self.admin() else ""
+        isi = tab_sisa("/sisa") + (form_tanggal("/sisa", tgl) if self.admin() else "")
         bar = ""
         if not rows:
             isi += kabar("awas", "Belum ada produksi di tanggal ini.")
@@ -1338,8 +1575,6 @@ class App(BaseHTTPRequestHandler):
                   <div class="kanan">{stepper(f"sisa_{r['id']}", val, f"Sisa {r['name']}", maks=r['dibuat'])}</div></div>
                   <div class="batch-info">Batch: {", ".join(e(x) for x in batch.get(r["id"], []))}</div></li>"""
             isi += "</ul></form>"
-            if self.boleh("sisa") or self.boleh("omzet") or self.boleh("untung"):
-                isi += '<p style="margin-top:16px"><a href="/sisa-harian">Lihat sisa per kue per hari</a></p>'
             bar = bar_aksi('<button class="tombol" form="f-sisa">Simpan sisa</button>')
         self.page("Sisa saat tutup", isi, bar=bar, alis=tgl_indo(tgl))
 
@@ -1469,7 +1704,7 @@ class App(BaseHTTPRequestHandler):
         pilihan = [("hari", "Hari ini", f"/sisa-harian?periode=hari&tanggal={today()}"), ("7", "7 hari", "/sisa-harian?periode=7"),
                    ("bulan", "Bulan ini", "/sisa-harian?periode=bulan"),
                    ("rentang", "Rentang", f"/sisa-harian?periode=rentang&dari={dari}&sampai={sampai}")]
-        isi = '<nav class="pilih" aria-label="Pilih periode">' + "".join(
+        isi = (tab_sisa("/sisa-harian") if self.boleh("sisa") else "") + '<nav class="pilih" aria-label="Pilih periode">' + "".join(
             f'<a href="{h}"{" aria-current=true" if periode == p else ""}>{t_}</a>' for p, t_, h in pilihan) + "</nav>"
         if periode == "rentang":
             isi += f"""<form class="rentang" method="get" action="/sisa-harian"><input type="hidden" name="periode" value="rentang">
@@ -1576,7 +1811,7 @@ class App(BaseHTTPRequestHandler):
         isi += """<p class="bantu">Gaji = persen × harga jual kue yang terjual (harga saat dicatat). Belum dikurangkan dari untung.
           <b>Sementara</b>: kue yang sisanya belum diisi dianggap terjual semua, jadi angkanya bisa turun setelah sisa diisi saat tutup.
           <b>Pasti</b>: semua sisa sudah diisi. <b>Saldo</b> = gaji terkumpul dikurangi yang sudah diambil.</p>"""
-        self.page("Gaji", isi, alis="Gaji berjalan", segarkan=True)
+        self.page("Gaji", isi, alis="Gaji berjalan", muat_ulang=True)
 
     def blok_gaji(self, u):
         g = saldo_info(self.db, u)
@@ -2106,7 +2341,8 @@ class App(BaseHTTPRequestHandler):
 def main():
     init_db()
     srv = ThreadingHTTPServer((HOST, PORT), App)
-    print(f"Toko Kue jalan di http://{HOST}:{PORT}  (data: {DB_PATH})", flush=True)
+    print(f"{NAMA_TOKO} jalan di http://{HOST}:{PORT}  (data: {DB_PATH})", flush=True)
+    mulai_backup_berkala()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

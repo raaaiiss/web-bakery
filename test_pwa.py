@@ -28,7 +28,7 @@ class TestPWA(Dasar):
         self.assertEqual(h["Content-Type"], "application/manifest+json")
         m = json.loads(data)
         self.assertEqual((m["display"], m["start_url"], m["scope"], m["lang"]), ("standalone", "/", "/", "id"))
-        self.assertEqual(m["short_name"], app.NAMA_TOKO[:12])
+        self.assertEqual(m["short_name"], app.NAMA_TOKO)
         self.assertIn(app.NAMA_TOKO, m["name"])
         self.assertEqual((m["theme_color"], m["background_color"]), ("#F7F1E6", "#F7F1E6"))
         ukuran = {(i["sizes"], i["purpose"]) for i in m["icons"]}

@@ -1,4 +1,4 @@
-# Pencatatan Toko Kue (prototype, fase 2)
+# Pencatatan Web Bakery (prototype, fase 2)
 
 Pengganti buku catatan: produksi harian, sisa saat tutup, laporan, dan gaji pembuat kue.
 
@@ -19,7 +19,7 @@ Fase 2:
   tidak muncul di halaman Gaji/Beranda, tidak bisa ditandai dibayar. Ya -> Tidak dengan gaji belum dibayar minta
   konfirmasi. Akun baru default Tidak. Migrasi: karyawan dengan persen > 0 = Ya, 0% = Tidak, admin = Tidak.
 - Gaji berjalan diberi label **sementara** (ada sisa belum diisi, dianggap terjual) atau **pasti**, plus baris
-  "Gaji hari ini". Halaman Gaji dan Beranda dimuat ulang otomatis tiap 1 menit. Admin bisa mengatur "Gaji dihitung mulai".
+  "Gaji hari ini". Tidak ada muat ulang otomatis; ikon muat ulang ada di kanan judul Beranda dan Gaji. Admin bisa mengatur "Gaji dihitung mulai".
 - Hapus user = nonaktifkan: tidak bisa masuk, sesi dihentikan, hilang dari daftar aktif dan Gaji; nama tetap di catatan
   lama; username tidak bisa dipakai lagi. Tidak bisa hapus diri sendiri atau admin terakhir.
 - Pengambilan gaji (pilihan C): saldo = gaji terkumpul periode ini - yang sudah diambil. "Ambil sebagian" mengurangi
@@ -35,7 +35,17 @@ Tampilan baru:
 - Sisa per batch: halaman Sisa menampilkan batch hari itu; halaman "Sisa per hari" menampilkan sisa
   per kue per hari (habis / ada sisa / belum diisi) dan daftar batch per tanggal buat.
 
-Belum ada (fase 3): unduh Excel, backup otomatis, push ke GitHub.
+Fase 3 (sudah di kode, belum di-commit):
+- **Unduh Excel** (khusus admin): menu Lainnya → Unduh Excel. Satu file `.xlsx` berisi lembar Produksi, Sisa,
+  Gaji (saldo sekarang), dan Riwayat gaji. Angkanya memakai rumus yang sama dengan halaman Laporan dan Gaji.
+  Dibuat dengan modul bawaan Python, tanpa pustaka tambahan.
+- **Backup otomatis**: **sekali sehari** jam `KUE_BACKUP_JAM` (default 00:05 WIT), database disalin ke
+  `data/backup/toko-YYYY-MM-DD.db` (berisi semua catatan sampai akhir hari sebelumnya). Kalau aplikasi mati
+  pada jam itu, backup dibuat saat aplikasi menyala, tetap paling banyak sekali per hari.
+  Hanya **7 hari terakhir** yang disimpan (`KUE_BACKUP_HARI`); backup harian yang lebih tua dihapus otomatis
+  setelah salinan baru jadi. File lain (misalnya `data/toko-sebelum-*.db`) tidak disentuh. Memulihkan: matikan aplikasi, salin file backup ke `data/toko.db`, nyalakan lagi.
+
+Belum ada: push ke GitHub (menunggu persetujuan pemilik).
 
 ### Pembaruan database
 Saat `app.py` versi fase 2 pertama kali jalan, database lama otomatis dinaikkan ke versi 2: hanya menambah
@@ -44,7 +54,7 @@ Karyawan lama tetap punya akses input produksi. Tetap salin `data/toko.db` dulu 
 Versi tampilan baru menambah kolom `cakes.color` dan `cakes.photo` (dicek dulu, hanya menambah).
 
 Tampilan: krem kertas, tinta cokelat kakao, tombol cokelat roti; navigasi bawah di HP, rel kiri di tablet.
-Font Karla dan Playfair Display (lisensi SIL Open Font License) disimpan di `static/fonts/`,
+Font Karla dan Poppins (lisensi SIL Open Font License) disimpan di `static/fonts/`,
 jadi tampilan tidak bergantung pada internet.
 
 ## Pasang di layar utama HP (pintasan)
@@ -52,7 +62,7 @@ jadi tampilan tidak bergantung pada internet.
 Aplikasi bisa ditambahkan ke layar utama HP sebagai ikon. HP harus tersambung ke wifi toko.
 Tidak ada mode offline dan tidak ada service worker: data selalu diambil dari server.
 
-- Nama di bawah ikon diatur lewat `KUE_NAMA_TOKO` (default "Toko Kue").
+- Nama di bawah ikon diatur lewat `KUE_NAMA_TOKO` (default "Web Bakery").
 - Ikon dibuat oleh `python3 tools/buat_ikon.py` ke `static/ikon/`. Logo sendiri: ganti PNG dengan ukuran yang sama
   (192, 512, maskable 512, apple-touch-icon 180).
 
@@ -90,7 +100,10 @@ Pengaturan lewat environment variable (opsional):
 | `KUE_PORT` | `8000` | port web |
 | `KUE_HOST` | `0.0.0.0` | `0.0.0.0` = bisa dibuka dari perangkat lain di wifi |
 | `KUE_DB` | `data/toko.db` | lokasi file database |
-| `KUE_TZ` | `Asia/Jakarta` | zona waktu untuk "hari ini" |
+| `KUE_TZ` | `Asia/Jayapura` | zona waktu (WIT, UTC+9) untuk jam dan "hari ini" |
+| `KUE_BACKUP_DIR` | `data/backup` | folder backup harian |
+| `KUE_BACKUP_JAM` | `00:05` | jam backup harian (WIT); kosong = backup otomatis mati |
+| `KUE_BACKUP_HARI` | `7` | berapa hari backup harian disimpan; `0` = simpan semua |
 
 ## Nyala otomatis (Linux dengan systemd)
 
