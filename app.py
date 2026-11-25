@@ -27,7 +27,7 @@ TZ = ZoneInfo(os.environ.get("KUE_TZ", "Asia/Jayapura"))  # WIT (UTC+9), sesuai 
 HOST = os.environ.get("KUE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("KUE_PORT", "8000"))
 SESSION_DAYS = 30
-# Nama toko untuk judul, ikon layar utama, dan manifest. Dipilih pemilik: "Web Bakery".
+# Nama toko untuk judul, ikon layar utama, manifest, dan nama file Excel. Atur lewat KUE_NAMA_TOKO.
 NAMA_TOKO = os.environ.get("KUE_NAMA_TOKO", "Web Bakery")
 BACKUP_DIR = os.environ.get("KUE_BACKUP_DIR", os.path.join(BASE, "data", "backup"))
 BACKUP_JAM = os.environ.get("KUE_BACKUP_JAM", "00:05")  # jam backup harian (WIT); kosong = backup otomatis mati
@@ -1242,7 +1242,7 @@ class App(BaseHTTPRequestHandler):
         data = buat_xlsx(data_excel(self.db))
         self.send_response(200)
         self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        self.send_header("Content-Disposition", f'attachment; filename="web-bakery-{today()}.xlsx"')
+        self.send_header("Content-Disposition", f'attachment; filename="{re.sub(r'[^a-z0-9]+', '-', NAMA_TOKO.lower()).strip('-')}-{today()}.xlsx"')
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
